@@ -305,12 +305,23 @@ def editor(request):
 
     if policy is not None:
         from policyengine.engine import get_generated_policy
-        if get_generated_policy(policy) is not None:
+        generated_policy = get_generated_policy(policy)
+        if generated_policy is not None:
             # GeneratedPolicy's logic lives in its script_code, not the
             # filter/check/notify/etc fields this old code editor expects --
-            # there's nothing meaningful to translate/render here yet.
+            # there's nothing meaningful to translate/render here yet. A
+            # silent redirect back to /main/ (the page you're likely
+            # already on) looks exactly like a dead link, so explain
+            # instead: this is a real gap, not a bug, until there's an
+            # editor UI for these.
             logger.info(f"Editor requested for GeneratedPolicy {policy_id}; no editor UI for these yet")
-            return redirect("/main/")
+            from django.utils.html import escape
+            return HttpResponse(
+                f"<p>No editor UI yet for GeneratedPolicy '{escape(policy.name)}' (id {policy.pk}) "
+                f"-- its logic lives in script_code, not the filter/check/notify fields this "
+                f"editor expects.</p><pre style='white-space:pre-wrap'>{escape(generated_policy.script_code)}</pre>"
+                f"<p><a href='/main/'>Back to dashboard</a></p>"
+            )
 
     if not policy or not policy.policy_template or recreate:
         # For these old policies, we want to create a policy template
