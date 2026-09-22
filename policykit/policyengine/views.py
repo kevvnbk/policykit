@@ -303,6 +303,15 @@ def editor(request):
         except Policy.DoesNotExist:
             raise Http404("Policy does not exist")
 
+    if policy is not None:
+        from policyengine.engine import get_generated_policy
+        if get_generated_policy(policy) is not None:
+            # GeneratedPolicy's logic lives in its script_code, not the
+            # filter/check/notify/etc fields this old code editor expects --
+            # there's nothing meaningful to translate/render here yet.
+            logger.info(f"Editor requested for GeneratedPolicy {policy_id}; no editor UI for these yet")
+            return redirect("/main/")
+
     if not policy or not policy.policy_template or recreate:
         # For these old policies, we want to create a policy template
         # so that we can render it in the new no-code editor.
