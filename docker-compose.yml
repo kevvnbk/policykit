@@ -78,7 +78,7 @@ services:
       - 15672:15672
 
   postgres:
-    image: postgres:alpine
+    image: postgres:16-alpine
     environment:
       - POSTGRES_DB=policykit
       - POSTGRES_USER=user
