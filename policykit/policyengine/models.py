@@ -1142,6 +1142,29 @@ class Policy(models.Model):
 
         return new_policy
 
+
+class GeneratedPolicy(Policy):
+    """
+    Policy defined by a generated, event-driven script.
+
+    Instead of PolicyKit's 5-stage filter/initialize/check/notify/success/fail
+    code blocks, a GeneratedPolicy stores a single script with a setup(ctx)
+    entry point that registers event handlers (ctx.on) and/or scheduled
+    callbacks (ctx.schedule), mirroring the sandbox pipeline's script format
+    (see the pk-sandbox repo). Bookkeeping -- marking the Proposal
+    passed/failed, executing or reverting the action -- is performed by the
+    script itself via the ctx object, not by PolicyKit's evaluation engine.
+    See policyengine/script_adapter.py and policyengine/engine.py's
+    evaluate_generated_policy().
+    """
+
+    script_code = models.TextField(blank=True, default='')
+    """Python script defining setup(ctx) and any event/schedule handlers it registers."""
+
+    def __str__(self):
+        return f"Generated Policy: {self.name}"
+
+
 class UserVote(models.Model):
     """UserVote"""
 
