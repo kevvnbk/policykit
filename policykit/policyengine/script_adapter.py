@@ -125,6 +125,17 @@ class PolicyKitContext:
             "recurring": recurring,
         })
 
+    # -- logging, visible on the PolicyKit dashboard's Logs page --------------
+
+    def log(self, message, level="info"):
+        """
+        Log a message to this evaluation's EvaluationLog, same as legacy
+        Policy code can via the injected `logger` -- shows up on the
+        dashboard's Logs page (policyengine/api_views.py's logs() /
+        LogsSerializer, backed by django_db_logger.EvaluationLog).
+        """
+        getattr(self.eval_context.logger, level, self.eval_context.logger.info)(message)
+
     # -- bookkeeping, called from a handler -----------------------------------
 
     def approve(self):
@@ -133,6 +144,7 @@ class PolicyKitContext:
         if self._decided:
             return
         self._decided = True
+        self.log(f"GeneratedPolicy '{self.policy.name}' approved {self.action}")
         self.proposal._pass_evaluation()
         if self.action._is_executable:
             self.action.execute()
@@ -143,6 +155,7 @@ class PolicyKitContext:
         if self._decided:
             return
         self._decided = True
+        self.log(f"GeneratedPolicy '{self.policy.name}' rejected {self.action}")
         self.proposal._fail_evaluation()
         if self.action._is_reversible:
             self.action._revert()
