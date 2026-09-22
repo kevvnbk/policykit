@@ -225,6 +225,20 @@ def evaluate_action(action):
                 return proposal
 
 
+def get_generated_policy(policy):
+    """
+    Return the GeneratedPolicy child row for `policy` if it is one, else None.
+    (Multi-table inheritance reverse accessor, wrapped since it raises
+    DoesNotExist rather than returning None on a miss.)
+    """
+    from policyengine.models import GeneratedPolicy
+
+    try:
+        return policy.generatedpolicy
+    except GeneratedPolicy.DoesNotExist:
+        return None
+
+
 def create_prefiltered_proposals(action, policies, allow_multiple=False):
     """
     Evaluate action against the Filter step in all provided policies, and return the Proposal
@@ -241,7 +255,13 @@ def create_prefiltered_proposals(action, policies, allow_multiple=False):
         proposal = Proposal(policy=policy, action=action, status=Proposal.PROPOSED)
         context = EvaluationContext(proposal, is_first_evaluation=True)
         try:
-            passed_filter = exec_code_block(policy.filter, context, Policy.FILTER)
+            if get_generated_policy(policy) is not None:
+                # GeneratedPolicy scripts decide relevance inside their own
+                # handlers (via ctx.on(event_type, ...)), not via a filter
+                # code block, so it's always eligible here.
+                passed_filter = True
+            else:
+                passed_filter = exec_code_block(policy.filter, context, Policy.FILTER)
         except Exception as e:
             # Log unhandled exception to the db, so policy author can view it in the UI.
             context.logger.error(f"Exception in 'filter': {str(e)}")
@@ -308,12 +328,46 @@ def evaluate_proposal(proposal, is_first_evaluation=False):
         raise
 
 
+def evaluate_generated_policy(context: EvaluationContext, generated_policy):
+    """
+    Evaluate a GeneratedPolicy: run its script's setup(ctx) to (re)build the
+    handler registry, dispatch to whichever handler is registered for this
+    action's event type, and let the script's ctx calls (ctx.approve() /
+    ctx.reject()) perform bookkeeping directly -- this function does NOT call
+    _pass_evaluation/_fail_evaluation/execute/_revert itself, unlike
+    evaluate_proposal_inner. See policyengine/script_adapter.py.
+    """
+    from policyengine.script_adapter import PolicyKitContext, action_to_event, execute_generated_script
+
+    proposal = context.proposal
+    ctx = PolicyKitContext(proposal, context)
+
+    # Re-run setup(ctx) every time: handler *functions* can't persist across
+    # separate evaluations, only their names can (see script_adapter.py), so
+    # we rebuild the actual callables fresh each call by re-executing the
+    # same script and re-registering via ctx.on()/ctx.schedule().
+    execute_generated_script(generated_policy.script_code, "setup", ctx=ctx)
+
+    event = action_to_event(proposal.action)
+    handler_name = ctx._event_handlers.get(event["type"])
+    if handler_name is None:
+        context.logger.debug(f"GeneratedPolicy '{generated_policy.name}' has no handler for event '{event['type']}', ignoring")
+        return True
+
+    execute_generated_script(generated_policy.script_code, handler_name, event=event, ctx=ctx)
+    return True
+
+
 def evaluate_proposal_inner(context: EvaluationContext, is_first_evaluation: bool):
     from policyengine.models import Policy, Proposal
 
     proposal = context.proposal
     action = proposal.action
     policy = proposal.policy
+
+    generated_policy = get_generated_policy(policy)
+    if generated_policy is not None:
+        return evaluate_generated_policy(context, generated_policy)
 
     #logger.debug('*')
     #logger.debug(action.__dict__)
