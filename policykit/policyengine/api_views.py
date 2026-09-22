@@ -1,5 +1,5 @@
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.exceptions import NotFound
 from django.contrib.auth import get_user
@@ -140,4 +140,87 @@ def put_members(user, action, role, members):
     if len(action_model.users.all()) != len(members):
         raise NotFound('User not found')
     action_model.save(evaluate_action=True)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def deploy_generated_policy(request):
+    """
+    Create a GeneratedPolicy from a script produced by an external policy
+    generation pipeline (see policy-llm's /deploy_to_policykit).
+
+    Prototype-grade auth: a single shared secret (X-Deploy-Secret header,
+    checked against POLICYKIT_DEPLOY_SECRET) and a single hardcoded target
+    community (POLICYKIT_DEPLOY_COMMUNITY_ID) -- not how this would work for
+    real multi-tenant use. See NOTES.md.
+    """
+    from django.conf import settings
+    from policyengine.models import Community, GeneratedPolicy, ActionType
+    from policyengine.script_adapter import (
+        execute_generated_script,
+        RegistrationOnlyContext,
+        event_type_to_action_type_codename,
+    )
+
+    if not settings.POLICYKIT_DEPLOY_SECRET:
+        return Response({"error": "POLICYKIT_DEPLOY_SECRET is not configured on this server"}, status=500)
+
+    provided_secret = request.headers.get("X-Deploy-Secret")
+    if provided_secret != settings.POLICYKIT_DEPLOY_SECRET:
+        return Response({"error": "invalid or missing X-Deploy-Secret header"}, status=403)
+
+    name = request.data.get("name")
+    script_code = request.data.get("script_code")
+    if not name or not script_code:
+        return Response({"error": "both 'name' and 'script_code' are required"}, status=400)
+
+    if not settings.POLICYKIT_DEPLOY_COMMUNITY_ID:
+        return Response({"error": "POLICYKIT_DEPLOY_COMMUNITY_ID is not configured on this server"}, status=500)
+    try:
+        community = Community.objects.get(pk=settings.POLICYKIT_DEPLOY_COMMUNITY_ID)
+    except Community.DoesNotExist:
+        return Response(
+            {"error": f"configured POLICYKIT_DEPLOY_COMMUNITY_ID={settings.POLICYKIT_DEPLOY_COMMUNITY_ID} does not exist"},
+            status=500,
+        )
+
+    # Validate the script and derive which ActionTypes it needs, in one dry
+    # run of setup(ctx) -- see RegistrationOnlyContext's docstring for why
+    # this is safe to do before any real Proposal/Action exists. A script
+    # that can't even run its own setup() has no business being saved as an
+    # active policy.
+    reg_ctx = RegistrationOnlyContext()
+    try:
+        execute_generated_script(script_code, "setup", ctx=reg_ctx)
+    except Exception as e:
+        return Response({"error": f"script failed validation: {type(e).__name__}: {e}"}, status=400)
+
+    action_type_codenames = set()
+    unmapped_event_types = []
+    for event_type in reg_ctx.event_types:
+        codename = event_type_to_action_type_codename(event_type)
+        if codename:
+            action_type_codenames.add(codename)
+        else:
+            unmapped_event_types.append(event_type)
+
+    if not action_type_codenames:
+        return Response({
+            "error": "script's setup(ctx) didn't register any handlers whose event type maps to a known ActionType",
+            "registered_event_types": reg_ctx.event_types,
+        }, status=400)
+
+    policy = GeneratedPolicy.objects.create(
+        kind='platform', name=name, community=community, script_code=script_code,
+    )
+    for codename in action_type_codenames:
+        action_type, _ = ActionType.objects.get_or_create(codename=codename)
+        policy.action_types.add(action_type)
+
+    return Response({
+        "success": True,
+        "policy_id": policy.pk,
+        "action_types": sorted(action_type_codenames),
+        "unmapped_event_types": unmapped_event_types,
+    }, status=201)
 

@@ -37,6 +37,12 @@ env = environ.Env(
     DJANGO_SILK=(bool, False),
     FORCE_SLACK_LOGIN=(str, None),
     DDTRACE=(bool, False),
+
+    # Shared-secret auth for the generated-policy deploy API (policy-llm ->
+    # PolicyKit). Prototype-grade: one shared secret, one target community --
+    # see policyengine/api_views.py's deploy_generated_policy().
+    POLICYKIT_DEPLOY_SECRET=(str, None),
+    POLICYKIT_DEPLOY_COMMUNITY_ID=(str, None),
 )
 environ.Env.read_env()
 
@@ -52,6 +58,8 @@ DJANGO_VITE_DEV_MODE = env("DJANGO_VITE_DEV_MODE")
 DJANGO_SILK = env("DJANGO_SILK")
 FORCE_SLACK_LOGIN = env("FORCE_SLACK_LOGIN")
 DDTRACE = env("DDTRACE")
+POLICYKIT_DEPLOY_SECRET = env("POLICYKIT_DEPLOY_SECRET")
+POLICYKIT_DEPLOY_COMMUNITY_ID = env("POLICYKIT_DEPLOY_COMMUNITY_ID")
 
 if DDTRACE:
     import ddtrace.auto # noqa: E402

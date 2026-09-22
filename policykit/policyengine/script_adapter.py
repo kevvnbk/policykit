@@ -190,3 +190,48 @@ def action_to_event(action):
     if hasattr(action, "channel"):
         data["channel_id"] = action.channel
     return {"type": f"{action_type}_created", "data": data}
+
+
+def event_type_to_action_type_codename(event_type):
+    """
+    Reverse of action_to_event's `f"{action_type}_created"` naming, so a
+    script's registered event types (from ctx.on(...)) can be mapped back to
+    real ActionType codenames. Returns None for an event type that doesn't
+    follow that convention -- caller decides what to do (e.g. warn/skip)
+    rather than this silently guessing.
+    """
+    suffix = "_created"
+    if event_type.endswith(suffix):
+        return event_type[: -len(suffix)]
+    return None
+
+
+class RegistrationOnlyContext:
+    """
+    Minimal ctx for dry-running a script's setup(ctx) before any real
+    Proposal/Action exists -- used to validate a generated script and derive
+    which event types (-> ActionType codenames) it needs before creating a
+    GeneratedPolicy at all. See api_views.py's deploy_generated_policy().
+
+    Only implements what setup(ctx) is expected to call (ctx.on/ctx.schedule)
+    plus a throwaway `store` -- deliberately does NOT implement approve/
+    reject/post_message/etc, since a script's setup() should only be
+    registering handlers, not doing real work. If a script's setup() tries
+    to call one of those, it'll get an AttributeError, which is itself a
+    useful validation signal (the script isn't safe to dry-run).
+    """
+
+    def __init__(self):
+        self.store = {}
+        self.event_types = []
+        self._schedule = []
+
+    def on(self, event_type, handler):
+        self.event_types.append(event_type)
+
+    def schedule(self, interval, handler, recurring=True):
+        self._schedule.append({
+            "interval": interval,
+            "handler": getattr(handler, "__name__", handler),
+            "recurring": recurring,
+        })
