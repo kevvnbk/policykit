@@ -479,7 +479,7 @@ def translate_policy_to_template_format(policy):
     """Procedure translation"""
     custom_procedure = Procedure(
         name=policy.name,
-        description=policy.description,
+        description=policy.description or '',
         is_template=False,
         view="codes",
     )
