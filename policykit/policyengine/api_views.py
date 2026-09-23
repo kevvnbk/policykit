@@ -189,7 +189,7 @@ def deploy_generated_policy(request):
     # this is safe to do before any real Proposal/Action exists. A script
     # that can't even run its own setup() has no business being saved as an
     # active policy.
-    reg_ctx = RegistrationOnlyContext()
+    reg_ctx = RegistrationOnlyContext(community)
     try:
         execute_generated_script(script_code, "setup", ctx=reg_ctx)
     except Exception as e:
