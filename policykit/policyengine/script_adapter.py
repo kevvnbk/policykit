@@ -172,16 +172,54 @@ class PolicyKitContext:
         from policyengine.models import CommunityUser
         return CommunityUser.objects.filter(community__community=self.action.community.community)
 
+    def get_channels(self):
+        slack = getattr(self.eval_context, "slack", None)
+        if slack is None:
+            raise NotImplementedError("No 'slack' CommunityPlatform available in this EvaluationContext")
+        return _wrap_channels(slack.get_conversations())
+
+    def get_channel(self, channel_id):
+        for ch in self.get_channels():
+            if ch.id == channel_id:
+                return ch
+        return None
+
+
+def _wrap_channels(conversations):
+    """
+    Slack's raw conversations.list response is a list of plain dicts
+    (channel['id'], channel['name']) -- scripts expect attribute access
+    (ch.id, ch.name), matching Brian's sandbox's channel objects. Wrap each
+    one rather than changing what the real Slack API call itself returns.
+    """
+    import types
+    return [types.SimpleNamespace(id=c.get("id"), name=c.get("name"), raw=c) for c in conversations]
+
+
+
+# ActionType codename <-> the event type name generated scripts actually use.
+# This is NOT an invented convention -- "member_joined_channel" showed up
+# verbatim in a real script from Brian's pipeline, matching Slack's own
+# native event name AND how integrations/slack/utils.py's
+# slack_event_to_platform_action() already maps that exact event to
+# SlackJoinConversation. "message_posted" matches Brian's own sandbox
+# examples/docs. An action_type with no entry here falls back to
+# f"{action_type}_created" in action_to_event (untested against any real
+# generated script, kept only so a plain PolicyKit action_type isn't
+# silently un-dispatchable) -- event_type_to_action_type_codename does NOT
+# reverse that fallback, since guessing wrong here means silently attaching
+# a policy to the wrong ActionType rather than just failing loudly.
+ACTION_TYPE_TO_EVENT_TYPE = {
+    "slackpostmessage": "message_posted",
+    "slackjoinconversation": "member_joined_channel",
+}
+EVENT_TYPE_TO_ACTION_TYPE = {v: k for k, v in ACTION_TYPE_TO_EVENT_TYPE.items()}
+
 
 def action_to_event(action):
     """
     Convert a real PolicyKit action into the sandbox event shape scripts
-    expect: {"type": ..., "data": {...}}.
-
-    TODO: this only covers SlackPostMessage so far -- extend per action type
-    as needed. See Brian's _action_to_event in POLICYKIT_INTEGRATION_PLAN.md
-    for the fuller mapping to crib from (with the same TODO: verify against
-    real field names, that doc wasn't checked against actual model fields).
+    expect: {"type": ..., "data": {...}}. See ACTION_TYPE_TO_EVENT_TYPE.
     """
     action_type = getattr(action, "action_type", type(action).__name__.lower())
     data = {"action_type": action_type}
@@ -189,45 +227,69 @@ def action_to_event(action):
         data["text"] = action.text
     if hasattr(action, "channel"):
         data["channel_id"] = action.channel
-    return {"type": f"{action_type}_created", "data": data}
+    event_type = ACTION_TYPE_TO_EVENT_TYPE.get(action_type, f"{action_type}_created")
+    return {"type": event_type, "data": data}
 
 
 def event_type_to_action_type_codename(event_type):
     """
-    Reverse of action_to_event's `f"{action_type}_created"` naming, so a
-    script's registered event types (from ctx.on(...)) can be mapped back to
-    real ActionType codenames. Returns None for an event type that doesn't
-    follow that convention -- caller decides what to do (e.g. warn/skip)
-    rather than this silently guessing.
+    Reverse of ACTION_TYPE_TO_EVENT_TYPE, so a script's registered event
+    types (from ctx.on(...)) can be mapped back to real ActionType
+    codenames at deploy time. Returns None for an unrecognized event type --
+    caller decides what to do (e.g. warn/skip) rather than this guessing.
     """
-    suffix = "_created"
-    if event_type.endswith(suffix):
-        return event_type[: -len(suffix)]
-    return None
+    return EVENT_TYPE_TO_ACTION_TYPE.get(event_type)
 
 
 class RegistrationOnlyContext:
     """
-    Minimal ctx for dry-running a script's setup(ctx) before any real
-    Proposal/Action exists -- used to validate a generated script and derive
-    which event types (-> ActionType codenames) it needs before creating a
+    ctx for dry-running a script's setup(ctx) before any real Proposal/Action
+    exists -- used to validate a generated script and derive which event
+    types (-> ActionType codenames) it needs before creating a
     GeneratedPolicy at all. See api_views.py's deploy_generated_policy().
 
-    Only implements what setup(ctx) is expected to call (ctx.on/ctx.schedule)
-    plus a throwaway `store` -- deliberately does NOT implement approve/
-    reject/post_message/etc, since a script's setup() should only be
-    registering handlers, not doing real work. If a script's setup() tries
-    to call one of those, it'll get an AttributeError, which is itself a
-    useful validation signal (the script isn't safe to dry-run).
+    Originally this only implemented ctx.on()/ctx.schedule(), on the
+    assumption that setup() should just register handlers. That assumption
+    was wrong: real generated scripts do real read-only work in setup() too
+    (e.g. looking up channel IDs by name to cache in ctx.store) -- so this
+    now supports the read-only parts of the ctx API too (get_channels/
+    get_channel/get_members), backed by the real target community, same as
+    PolicyKitContext at actual evaluation time. It still doesn't implement
+    approve/reject/post_message/emit_action -- those are genuinely unsafe to
+    call before a real triggering action exists, and a script whose setup()
+    tries to will get a clear NotImplementedError (not the confusing
+    'NoneType' object is not callable that comes from RestrictedPython's
+    safer_getattr silently returning None for a truly missing attribute --
+    confirmed that's what happens for any ctx method that isn't defined at
+    all, which is why this class's read-only coverage needs to stay honest
+    with PolicyKitContext's, not just whatever's convenient to stub).
     """
 
-    def __init__(self):
+    def __init__(self, community):
+        self.community = community
         self.store = {}
         self.event_types = []
         self._schedule = []
 
     def on(self, event_type, handler):
         self.event_types.append(event_type)
+
+    def get_channels(self):
+        from integrations.slack.models import SlackCommunity
+        slack = SlackCommunity.objects.filter(community=self.community).first()
+        if slack is None:
+            raise NotImplementedError(f"No SlackCommunity configured for community {self.community.pk}")
+        return _wrap_channels(slack.get_conversations())
+
+    def get_channel(self, channel_id):
+        for ch in self.get_channels():
+            if ch.id == channel_id:
+                return ch
+        return None
+
+    def get_members(self):
+        from policyengine.models import CommunityUser
+        return CommunityUser.objects.filter(community__community=self.community)
 
     def schedule(self, interval, handler, recurring=True):
         self._schedule.append({
