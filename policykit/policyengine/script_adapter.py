@@ -85,6 +85,57 @@ HANDLERS_KEY = "_generated_policy_handlers"  # event_type -> handler function na
 SCHEDULE_KEY = "_generated_policy_schedule"  # [{interval, handler, recurring}]
 
 
+class ScriptStore:
+    """
+    ctx.store wrapper supporting BOTH interfaces real generated scripts use:
+    method-style (.get(key)/.set(key, value), matching DataStore) and
+    dict-style (store["key"] = value, .setdefault(key, default)). Confirmed
+    both styles occur across different real scripts from the same pipeline
+    -- one plain dict OR one DataStore can't satisfy both APIs on its own
+    (dicts have no .set(), DataStore has no __setitem__/.setdefault()), so
+    this wraps whichever backend (a dict for RegistrationOnlyContext, a real
+    DataStore for PolicyKitContext) and normalizes both APIs on top of it.
+    """
+
+    def __init__(self, backend):
+        self._backend = backend
+        self._is_dict = isinstance(backend, dict)
+
+    def get(self, key, default=None):
+        # Both a plain dict's .get(key) and DataStore's .get(key) already
+        # return None on a miss, so no branching needed here.
+        value = self._backend.get(key)
+        return default if value is None else value
+
+    def set(self, key, value):
+        if self._is_dict:
+            self._backend[key] = value
+        else:
+            self._backend.set(key, value)
+
+    def remove(self, key):
+        if self._is_dict:
+            self._backend.pop(key, None)
+        else:
+            self._backend.remove(key)
+
+    def setdefault(self, key, default):
+        current = self.get(key)
+        if current is None:
+            self.set(key, default)
+            return default
+        return current
+
+    def __getitem__(self, key):
+        return self.get(key)
+
+    def __setitem__(self, key, value):
+        self.set(key, value)
+
+    def __contains__(self, key):
+        return self.get(key) is not None
+
+
 class PolicyKitContext:
     """
     ctx object passed to a GeneratedPolicy script's setup(ctx) and its
@@ -100,8 +151,8 @@ class PolicyKitContext:
         e.g. ctx.eval_context.slack, ctx.eval_context.metagov if a script
         needs the underlying platform client directly."""
 
-        self.store = proposal.data
-        """Proposal-scoped persistent key/value store (DataStore.get/set/remove)."""
+        self.store = ScriptStore(proposal.data)
+        """Proposal-scoped persistent key/value store -- see ScriptStore."""
 
         self._event_handlers = {}
         self._schedule = []
@@ -172,6 +223,13 @@ class PolicyKitContext:
         from policyengine.models import CommunityUser
         return CommunityUser.objects.filter(community__community=self.action.community.community)
 
+    def get_user(self, user_id):
+        from policyengine.models import CommunityUser
+        user = CommunityUser.objects.filter(
+            community__community=self.action.community.community, username=user_id
+        ).first()
+        return _wrap_user(user)
+
     def get_channels(self):
         slack = getattr(self.eval_context, "slack", None)
         if slack is None:
@@ -194,6 +252,24 @@ def _wrap_channels(conversations):
     """
     import types
     return [types.SimpleNamespace(id=c.get("id"), name=c.get("name"), raw=c) for c in conversations]
+
+
+def _wrap_user(user):
+    """
+    Scripts expect ctx.get_user(id).roles to be a plain list of role-name
+    strings (e.g. "member" -- confirmed against a real script's `r.lower()
+    in eligible` check), not CommunityUser.get_roles()'s list of CommunityRole
+    objects. Returns None (not a wrapper) if no such user exists -- matches
+    scripts' own `if not member: return False` pattern.
+    """
+    import types
+    if user is None:
+        return None
+    return types.SimpleNamespace(
+        id=user.username,
+        roles=[r.role_name for r in user.get_roles()],
+        raw=user,
+    )
 
 
 
@@ -267,7 +343,7 @@ class RegistrationOnlyContext:
 
     def __init__(self, community):
         self.community = community
-        self.store = {}
+        self.store = ScriptStore({})
         self.event_types = []
         self._schedule = []
 
@@ -280,6 +356,11 @@ class RegistrationOnlyContext:
         if slack is None:
             raise NotImplementedError(f"No SlackCommunity configured for community {self.community.pk}")
         return _wrap_channels(slack.get_conversations())
+
+    def get_user(self, user_id):
+        from policyengine.models import CommunityUser
+        user = CommunityUser.objects.filter(community__community=self.community, username=user_id).first()
+        return _wrap_user(user)
 
     def get_channel(self, channel_id):
         for ch in self.get_channels():
