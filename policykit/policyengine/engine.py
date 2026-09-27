@@ -346,6 +346,18 @@ def evaluate_generated_policy(context: EvaluationContext, generated_policy):
     from policyengine import script_runtime
 
     proposal = context.proposal
+
+    if not generated_policy.initialized:
+        # Dispatch reads the registry that setup() populates at install, so an
+        # uninitialized policy matches nothing. Say so loudly: silently doing
+        # nothing looks exactly like a policy that correctly had no opinion.
+        context.logger.warning(
+            f"Policy '{generated_policy.name}' has never been installed (setup(ctx) has not run), "
+            f"so it has no handlers and will ignore this action. Run "
+            f"`manage.py install_script_policies` to install it."
+        )
+        return True
+
     event = script_runtime.action_to_event(proposal.action)
     handlers = script_runtime.dispatch_event(
         generated_policy, event, proposal=proposal, evaluation_context=context
