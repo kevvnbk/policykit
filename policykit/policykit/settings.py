@@ -326,6 +326,11 @@ CELERY_BEAT_SCHEDULE = {
     #     "task": "integrations.discourse.tasks.discourse_listener_actions",
     #     "schedule": CELERY_BEAT_FREQUENCY,
     # },
+    # Fire due ctx.schedule() callbacks from script policies
+    "scheduled-callbacks-beat": {
+        "task": "policyengine.tasks.fire_due_scheduled_callbacks",
+        "schedule": CELERY_BEAT_FREQUENCY,
+    },
     # Metagov task for polling external platforms
     "metagov-plugins-beat": {
         "task": "metagov.core.tasks.execute_plugin_tasks",

@@ -155,12 +155,9 @@ def deploy_generated_policy(request):
     real multi-tenant use. See NOTES.md.
     """
     from django.conf import settings
+    from django.db import transaction
     from policyengine.models import Community, GeneratedPolicy, ActionType
-    from policyengine.script_adapter import (
-        execute_generated_script,
-        RegistrationOnlyContext,
-        event_type_to_action_type_codename,
-    )
+    from policyengine import script_runtime
 
     if not settings.POLICYKIT_DEPLOY_SECRET:
         return Response({"error": "POLICYKIT_DEPLOY_SECRET is not configured on this server"}, status=500)
@@ -184,38 +181,41 @@ def deploy_generated_policy(request):
             status=500,
         )
 
-    # Validate the script and derive which ActionTypes it needs, in one dry
-    # run of setup(ctx) -- see RegistrationOnlyContext's docstring for why
-    # this is safe to do before any real Proposal/Action exists. A script
-    # that can't even run its own setup() has no business being saved as an
-    # active policy.
-    reg_ctx = RegistrationOnlyContext(community)
+    # Install the policy: create it, then run its setup(ctx) exactly once.
+    # setup() is the real thing, not a dry run -- real scripts do real work in
+    # it (looking up channel ids to cache in ctx.store), and ctx.store /
+    # ctx.schedule need a saved policy to hang rows off. Anything setup() wrote
+    # is rolled back with the policy if it fails, so a script that can't run
+    # its own setup() leaves nothing behind.
     try:
-        execute_generated_script(script_code, "setup", ctx=reg_ctx)
+        with transaction.atomic():
+            policy = GeneratedPolicy.objects.create(
+                kind='platform', name=name, community=community, script_code=script_code,
+            )
+            registry = script_runtime.install_script_policy(policy)
+
+            action_type_codenames = set()
+            unmapped_event_types = []
+            for event_type in registry.keys():
+                codename = script_runtime.event_type_to_action_type_codename(event_type)
+                if codename:
+                    action_type_codenames.add(codename)
+                else:
+                    unmapped_event_types.append(event_type)
+
+            if not action_type_codenames:
+                raise script_runtime.PolicyScriptError(
+                    "setup(ctx) didn't register any handlers whose event type maps to a known "
+                    f"ActionType (registered: {sorted(registry.keys()) or 'nothing'})"
+                )
+
+            for codename in action_type_codenames:
+                action_type, _ = ActionType.objects.get_or_create(codename=codename)
+                policy.action_types.add(action_type)
+    except script_runtime.PolicyScriptError as e:
+        return Response({"error": f"script rejected: {e}"}, status=400)
     except Exception as e:
-        return Response({"error": f"script failed validation: {type(e).__name__}: {e}"}, status=400)
-
-    action_type_codenames = set()
-    unmapped_event_types = []
-    for event_type in reg_ctx.event_types:
-        codename = event_type_to_action_type_codename(event_type)
-        if codename:
-            action_type_codenames.add(codename)
-        else:
-            unmapped_event_types.append(event_type)
-
-    if not action_type_codenames:
-        return Response({
-            "error": "script's setup(ctx) didn't register any handlers whose event type maps to a known ActionType",
-            "registered_event_types": reg_ctx.event_types,
-        }, status=400)
-
-    policy = GeneratedPolicy.objects.create(
-        kind='platform', name=name, community=community, script_code=script_code,
-    )
-    for codename in action_type_codenames:
-        action_type, _ = ActionType.objects.get_or_create(codename=codename)
-        policy.action_types.add(action_type)
+        return Response({"error": f"script failed to install: {type(e).__name__}: {e}"}, status=400)
 
     return Response({
         "success": True,

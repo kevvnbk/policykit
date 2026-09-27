@@ -53,7 +53,17 @@ def _guarded_import(mname, globals=None, locals=None, fromlist=None, level=None)
     """
     Special case to allow builting import for time module. For some reason this is invoked from datetime.strftime()
     Fixes https://github.com/amyxzhang/policykit/issues/534
+
+    Also satisfies an `import X` for a module that is ALREADY provided to
+    policy code as a pre-injected name (datetime, json, random, ...). That
+    grants no new capability -- the same module object is already reachable
+    without importing -- it just stops a redundant import statement from being
+    fatal. Generated policy scripts emit these despite being told not to, and
+    the failure was otherwise a hard SyntaxError on an otherwise fine script.
+    Anything not already provided is still refused.
     """
+    if mname in policykit_builtins:
+        return policykit_builtins[mname]
     if mname == "time":
         return __import__(mname, globals or {}, locals or {}, fromlist or ())
     raise SyntaxError(f"Restricted, cannot import '{mname}'")

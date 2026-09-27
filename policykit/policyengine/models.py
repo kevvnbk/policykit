@@ -1154,15 +1154,80 @@ class GeneratedPolicy(Policy):
     (see the pk-sandbox repo). Bookkeeping -- marking the Proposal
     passed/failed, executing or reverting the action -- is performed by the
     script itself via the ctx object, not by PolicyKit's evaluation engine.
-    See policyengine/script_adapter.py and policyengine/engine.py's
+    See policyengine/script_runtime.py and policyengine/engine.py's
     evaluate_generated_policy().
     """
 
     script_code = models.TextField(blank=True, default='')
     """Python script defining setup(ctx) and any event/schedule handlers it registers."""
 
+    initialized = models.BooleanField(default=False)
+    """True once setup(ctx) has been run for this install. setup() runs exactly
+    once -- running it again must be a no-op, not a re-registration that would
+    double-fire handlers. See script_runtime.install_script_policy()."""
+
+    handler_registry = models.JSONField(default=dict, blank=True)
+    """{event_type: [handler function name, ...]} recorded by ctx.on() during
+    the single setup() run. Persisted rather than rebuilt by re-running
+    setup() on each event, so setup()'s own side effects (API calls, store
+    writes) happen once at install and not on every incoming action."""
+
     def __str__(self):
         return f"Generated Policy: {self.name}"
+
+
+class PolicyStoreEntry(models.Model):
+    """
+    Durable key-value store backing ctx.store for a script policy.
+
+    One row per (policy, key) so a write touches exactly one row: the older
+    DataStore approach (used for Proposal.data) serialises the whole store to
+    one JSON blob, so two concurrent writes to different keys lose one of
+    them. Scope is the policy -- NOT the Proposal -- because a script needs
+    state to survive across separate triggering actions (each of which gets
+    its own Proposal and therefore its own DataStore).
+    """
+
+    policy = models.ForeignKey('Policy', models.CASCADE, related_name='store_entries')
+    key = models.CharField(max_length=255)
+    value = models.JSONField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('policy', 'key')
+
+    def __str__(self):
+        return f"PolicyStoreEntry({self.policy_id}, {self.key})"
+
+
+class ScheduledCallback(models.Model):
+    """
+    One durably-recorded ctx.schedule() call.
+
+    Holds data, never a Python object: the callable is stored as the name of a
+    top-level function in the policy's own script, re-resolved at fire time by
+    re-executing that script. That is why ctx.schedule() rejects closures,
+    lambdas and bound methods -- none of them can be reconstructed from a name.
+    """
+
+    policy = models.ForeignKey('Policy', models.CASCADE, related_name='scheduled_callbacks')
+    run_at = models.DateTimeField()
+    function_name = models.CharField(max_length=255)
+    args = models.JSONField(default=list)
+    fired_at = models.DateTimeField(null=True, blank=True)
+    """Set when the poller has claimed and run this row. Null means still due."""
+
+    error = models.TextField(blank=True, default='')
+    """Traceback if the callback raised. Still counts as fired -- the poller
+    does not retry, so one bad callback can't wedge the queue."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['fired_at', 'run_at'])]
+
+    def __str__(self):
+        return f"ScheduledCallback({self.policy_id}, {self.function_name}, {self.run_at})"
 
 
 class UserVote(models.Model):

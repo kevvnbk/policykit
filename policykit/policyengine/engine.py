@@ -330,31 +330,30 @@ def evaluate_proposal(proposal, is_first_evaluation=False):
 
 def evaluate_generated_policy(context: EvaluationContext, generated_policy):
     """
-    Evaluate a GeneratedPolicy: run its script's setup(ctx) to (re)build the
-    handler registry, dispatch to whichever handler is registered for this
-    action's event type, and let the script's ctx calls (ctx.approve() /
-    ctx.reject()) perform bookkeeping directly -- this function does NOT call
-    _pass_evaluation/_fail_evaluation/execute/_revert itself, unlike
-    evaluate_proposal_inner. See policyengine/script_adapter.py.
+    Evaluate a script policy: convert the triggering action into an event and
+    run whichever handler(s) the script registered for that event type at
+    install time (GeneratedPolicy.handler_registry).
+
+    setup(ctx) is NOT re-run here -- it ran once at install. Re-running it per
+    event would repeat its side effects (API lookups, store writes) on every
+    incoming action.
+
+    This function performs no bookkeeping of its own: a handler decides the
+    triggering action's fate via ctx.approve()/ctx.reject(), unlike
+    evaluate_proposal_inner. A script with no handler for this event type
+    simply leaves the proposal alone. See policyengine/script_runtime.py.
     """
-    from policyengine.script_adapter import PolicyKitContext, action_to_event, execute_generated_script
+    from policyengine import script_runtime
 
     proposal = context.proposal
-    ctx = PolicyKitContext(proposal, context)
-
-    # Re-run setup(ctx) every time: handler *functions* can't persist across
-    # separate evaluations, only their names can (see script_adapter.py), so
-    # we rebuild the actual callables fresh each call by re-executing the
-    # same script and re-registering via ctx.on()/ctx.schedule().
-    execute_generated_script(generated_policy.script_code, "setup", ctx=ctx)
-
-    event = action_to_event(proposal.action)
-    handler_name = ctx._event_handlers.get(event["type"])
-    if handler_name is None:
-        context.logger.debug(f"GeneratedPolicy '{generated_policy.name}' has no handler for event '{event['type']}', ignoring")
-        return True
-
-    execute_generated_script(generated_policy.script_code, handler_name, event=event, ctx=ctx)
+    event = script_runtime.action_to_event(proposal.action)
+    handlers = script_runtime.dispatch_event(
+        generated_policy, event, proposal=proposal, evaluation_context=context
+    )
+    if not handlers:
+        context.logger.debug(
+            f"Policy '{generated_policy.name}' has no handler for event '{event.type}', ignoring"
+        )
     return True
 
 
