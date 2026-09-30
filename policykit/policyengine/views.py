@@ -316,11 +316,50 @@ def editor(request):
             # editor UI for these.
             logger.info(f"Editor requested for GeneratedPolicy {policy_id}; no editor UI for these yet")
             from django.utils.html import escape
+            from django.middleware.csrf import get_token
+
+            # The old no-code editor (no-code/main.html, rendered below for a
+            # regular Policy) has its own delete flow buried in a "discard
+            # changes" confirmation popup, which calls this same
+            # policy_action_remove endpoint -- it works unmodified for a
+            # GeneratedPolicy too, since it just looks up Policy by pk and
+            # branches on policy.kind, not on which Policy subclass it is.
+            # This route bypasses that template entirely (there's nothing to
+            # render it for yet), so wire a plain equivalent here rather than
+            # leaving GeneratedPolicy with no delete option at all. Like the
+            # original, this PROPOSES removal via a governed constitution
+            # action (PolicykitRemove*Policy, which sets is_active=False) --
+            # whether it takes effect immediately or needs a vote depends on
+            # the caller's permissions under this community's own governance,
+            # same as any other governed action.
+            csrf_token = get_token(request)
             return HttpResponse(
                 f"<p>No editor UI yet for GeneratedPolicy '{escape(policy.name)}' (id {policy.pk}) "
                 f"-- its logic lives in script_code, not the filter/check/notify fields this "
                 f"editor expects.</p><pre style='white-space:pre-wrap'>{escape(generated_policy.script_code)}</pre>"
                 f"<p><a href='/main/'>Back to dashboard</a></p>"
+                f"<p><button id='delete-generated-policy-btn' style='color:#b91c1c'>Delete this policy</button></p>"
+                f"<p id='delete-generated-policy-status'></p>"
+                f"<script>"
+                f"document.getElementById('delete-generated-policy-btn').addEventListener('click', function() {{"
+                f"  if (!confirm('Propose removing this policy? Depending on your permissions this may take effect immediately or require a vote.')) return;"
+                f"  var btn = this; btn.disabled = true;"
+                f"  fetch('/main/policyengine/policy_action_remove', {{"
+                f"    method: 'POST',"
+                f"    headers: {{'Content-Type': 'application/json', 'X-CSRFToken': '{csrf_token}'}},"
+                f"    body: JSON.stringify({{policy: {policy.pk}}})"
+                f"  }})"
+                f"  .then(function(r) {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})"
+                f"  .then(function(data) {{"
+                f"    document.getElementById('delete-generated-policy-status').textContent = 'Removal proposed (action #' + data.action + '). Redirecting...';"
+                f"    setTimeout(function() {{ window.location.href = '/main/'; }}, 1000);"
+                f"  }})"
+                f"  .catch(function(e) {{"
+                f"    btn.disabled = false;"
+                f"    document.getElementById('delete-generated-policy-status').textContent = 'Failed: ' + e.message;"
+                f"  }});"
+                f"}});"
+                f"</script>"
             )
 
     if not policy or not policy.policy_template or recreate:
