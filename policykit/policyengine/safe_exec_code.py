@@ -9,6 +9,8 @@ import datetime
 import base64
 import itertools
 import json
+import re
+import collections
 import logging
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ policykit_builtins = {
     "base64": base64,
     "itertools": itertools,
     "json": json,
+    "re": re,
+    "collections": collections,
 }
 
 STATIC_GLOBAL_VARIABLES = {
