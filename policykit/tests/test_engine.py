@@ -655,3 +655,65 @@ class BasePolicyTests(TestCase):
 
         platform_policies = {p.pk for p in self.community.get_platform_policies()}
         self.assertEqual(platform_policies, {legacy_policy.pk, generated_policy.pk})
+
+
+class GeneratedPolicyDispatchTests(TestCase):
+    """
+    Every eligible GeneratedPolicy must run on a matching action -- there is
+    no trigger/platform "only one policy wins" distinction for generated
+    policies (see engine.run_generated_policies()), and one policy's failure
+    must not stop the others.
+    """
+
+    HANDLER_SCRIPT = (
+        "def setup(ctx):\n"
+        "    ctx.on('message_posted', handle)\n"
+        "\n"
+        "def handle(event, ctx):\n"
+        "    ctx.store.set('ran', True)\n"
+    )
+
+    FAILING_HANDLER_SCRIPT = (
+        "def setup(ctx):\n"
+        "    ctx.on('message_posted', handle)\n"
+        "\n"
+        "def handle(event, ctx):\n"
+        "    ctx.store.set('ran', True)\n"
+        "    raise Exception('boom')\n"
+    )
+
+    def setUp(self):
+        from integrations.slack.models import SlackPostMessage
+
+        from policyengine import script_runtime
+
+        self.slack_community, self.user = TestUtils.create_slack_community_and_user()
+        self.community = self.slack_community.community
+        self.action_type, _ = ActionType.objects.get_or_create(codename="slackpostmessage")
+        self.script_runtime = script_runtime
+        self.SlackPostMessage = SlackPostMessage
+
+    def make_generated_policy(self, name, script_code):
+        policy = GeneratedPolicy.objects.create(
+            name=name, kind=BasePolicy.PLATFORM, community=self.community, script_code=script_code,
+        )
+        self.script_runtime.install_script_policy(policy)
+        policy.action_types.add(self.action_type)
+        return policy
+
+    def ran(self, policy):
+        return self.script_runtime.PolicyStore(policy).get("ran")
+
+    def test_both_matching_policies_run_and_a_failure_does_not_stop_the_other(self):
+        failing_policy = self.make_generated_policy("fails", self.FAILING_HANDLER_SCRIPT)
+        other_policy = self.make_generated_policy("succeeds", self.HANDLER_SCRIPT)
+
+        action = self.SlackPostMessage(
+            community=self.slack_community, initiator=self.user, text="hello", channel="C1",
+        )
+        action.save()
+
+        self.assertTrue(self.ran(failing_policy))
+        self.assertTrue(self.ran(other_policy))
+        self.assertEqual(Proposal.objects.filter(policy=failing_policy, action=action).count(), 0)
+        self.assertEqual(Proposal.objects.filter(policy=other_policy, action=action).count(), 1)

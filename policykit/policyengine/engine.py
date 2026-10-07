@@ -162,9 +162,41 @@ def get_eligible_policies(action):
     return eligible_policies
 
 
+def run_generated_policies(action, generated_policies):
+    """
+    Run every eligible GeneratedPolicy against `action`, independently of
+    each other and of action.kind.
+    """
+    from policyengine.models import Proposal
+
+    proposals = []
+    for policy in generated_policies.order_by('pk'):
+        proposal = Proposal(policy=policy, action=action, status=Proposal.PROPOSED)
+        if not action.pk:
+            action.save()
+        proposal.save()
+        try:
+            evaluate_proposal(proposal, is_first_evaluation=True)
+        except Exception as e:
+            # One policy's failure must not stop the others from running.
+            # Logged with the policy id (not just the proposal) so this is
+            # findable even if the proposal itself gets deleted below.
+            logger.error(
+                f"GeneratedPolicy {policy.pk} ('{policy.name}') raised {type(e).__name__} "
+                f"evaluating {action}: {e}"
+            )
+            proposal.delete()
+        else:
+            proposals.append(proposal)
+    return proposals
+
+
 def evaluate_action(action):
     """
     Called the FIRST TIME that an action is evaluated.
+
+    GeneratedPolicy is dispatched the same way regardless of action.kind --
+    see run_generated_policies(). Everything below is legacy Policy only:
 
     For governable actions ("platform" and "constitution"):
     - Get a list of eligible policies based on action_types. Raise an error if no policies match. There should always be a matching base policy from the starterkit.
@@ -175,7 +207,7 @@ def evaluate_action(action):
     - Evaluate against all eligible policies
     - Save the Proposal for each evaluation, which will be re-evaluated from the celery task if it is pending
     """
-    from policyengine.models import PolicyActionKind
+    from policyengine.models import GeneratedPolicy, PolicyActionKind, Proposal
 
     # logger.debug("evaluate_action", extra={"evaluate_action.action": action})
 
@@ -187,42 +219,66 @@ def evaluate_action(action):
         else:
             return None
 
-    # If this is a trigger action, evaluate ALL eligible policies
+    generated_policies = eligible_policies.instance_of(GeneratedPolicy)
+    legacy_policies = eligible_policies.not_instance_of(GeneratedPolicy)
+
+    generated_proposals = run_generated_policies(action, generated_policies)
+
+    # If this is a trigger action, evaluate ALL eligible (legacy) policies
     if action.kind == PolicyActionKind.TRIGGER:
         proposals = []
-        matching_policies_proposals = create_prefiltered_proposals(action, eligible_policies, allow_multiple=True)
-        logger.debug("evaluate_action:trigger", extra={"evaluate_action.len(trigger_proposals)": len(matching_policies_proposals)})
-        for proposal in matching_policies_proposals:
-            try:
-                evaluate_proposal(proposal, is_first_evaluation=True)
-            except Exception as e:
-                logger.debug(f"{proposal} raised exception {type(e).__name__} {e}")
-                proposal.delete()
-            else:
-                proposals.append(proposal)
-        return proposals
+        if legacy_policies.exists():
+            matching_policies_proposals = create_prefiltered_proposals(action, legacy_policies, allow_multiple=True)
+            logger.debug("evaluate_action:trigger", extra={"evaluate_action.len(trigger_proposals)": len(matching_policies_proposals)})
+            for proposal in matching_policies_proposals:
+                try:
+                    evaluate_proposal(proposal, is_first_evaluation=True)
+                except Exception as e:
+                    logger.debug(f"{proposal} raised exception {type(e).__name__} {e}")
+                    proposal.delete()
+                else:
+                    proposals.append(proposal)
+        return proposals + generated_proposals
 
-    # If this is a governable action, choose ONE policy to evaluate
+    # If this is a governable action, choose ONE legacy policy to evaluate
     else:
         # logger.debug("evaluate_action:governable")
-        while eligible_policies.exists():
-            proposal = create_prefiltered_proposals(action, eligible_policies)
+        legacy_winner = None
+        remaining = legacy_policies
+        while remaining.exists():
+            proposal = create_prefiltered_proposals(action, remaining)
             # logger.debug("evaluate_action:governable evaluating proposal", extra={"evaluate_action.proposal": proposal})
             if not proposal:
                 # This means that the action didn't pass the filter for ANY policies.
                 logger.warn(f"Governable action {action} did not pass Filter for any eligible policies.")
-                return None
+                break
 
             # Run the proposal
             try:
                 evaluate_proposal(proposal, is_first_evaluation=True)
             except Exception as e:
-                eligible_policies = eligible_policies.exclude(pk=proposal.policy.pk)
+                remaining = remaining.exclude(pk=proposal.policy.pk)
                 logger.debug(f"{proposal} raised exception {type(e).__name__} {e}, choosing a different policy...")
                 proposal.delete()
                 pass
             else:
+                legacy_winner = proposal
+                break
+
+        if legacy_winner:
+            return legacy_winner
+
+        # No legacy policy governed this action (including "there were no
+        # eligible legacy policies at all" -- the common case for a
+        # GeneratedPolicy-only community). Multiple generated policies
+        # simultaneously deciding the same action is a conflict the engine
+        # doesn't resolve (out of scope, see the task writeup); picking the
+        # first by id keeps today's single-generated-policy behavior (which
+        # this was) unchanged.
+        for proposal in generated_proposals:
+            if proposal.status == Proposal.PASSED:
                 return proposal
+        return generated_proposals[0] if generated_proposals else None
 
 
 def create_prefiltered_proposals(action, policies, allow_multiple=False):
