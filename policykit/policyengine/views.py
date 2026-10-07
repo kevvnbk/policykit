@@ -292,21 +292,20 @@ def editor(request):
     user = get_user(request)
     community = user.community.community
 
-    from policyengine.models import Policy, PolicyActionKind
+    from policyengine.models import BasePolicy, GeneratedPolicy, PolicyActionKind
     if kind not in [PolicyActionKind.PLATFORM, PolicyActionKind.CONSTITUTION, PolicyActionKind.TRIGGER]:
         raise Http404("Policy does not exist")
 
     policy = None
     if policy_id:
         try:
-            policy = Policy.objects.get(id=policy_id, community=community)
-        except Policy.DoesNotExist:
+            policy = BasePolicy.objects.get(id=policy_id, community=community)
+        except BasePolicy.DoesNotExist:
             raise Http404("Policy does not exist")
 
     if policy is not None:
-        from policyengine.engine import get_generated_policy
-        generated_policy = get_generated_policy(policy)
-        if generated_policy is not None:
+        if isinstance(policy, GeneratedPolicy):
+            generated_policy = policy
             # GeneratedPolicy's logic lives in its script_code, not the
             # filter/check/notify/etc fields this old code editor expects --
             # there's nothing meaningful to translate/render here yet. A
@@ -645,7 +644,7 @@ def policy_action_save(request):
                                      PolicykitChangePlatformPolicy,
                                      PolicykitChangeTriggerPolicy)
 
-    from policyengine.models import Policy
+    from policyengine.models import BasePolicy, Policy
 
     data = json.loads(request.body)
     user = get_user(request)
@@ -677,8 +676,8 @@ def policy_action_save(request):
         community = user.community.community
 
         try:
-            action.policy = Policy.objects.get(pk=data['policy'], community=community)
-        except Policy.DoesNotExist:
+            action.policy = BasePolicy.objects.get(pk=data['policy'], community=community)
+        except BasePolicy.DoesNotExist:
             raise Http404("Policy does not exist")
 
     else:
@@ -735,15 +734,15 @@ def policy_action_remove(request):
                                      PolicykitRemovePlatformPolicy,
                                      PolicykitRemoveTriggerPolicy)
 
-    from policyengine.models import Policy
+    from policyengine.models import BasePolicy, Policy
 
     data = json.loads(request.body)
     user = get_user(request)
 
     action = None
     try:
-        policy = Policy.objects.get(pk=data['policy'], community=user.community.community)
-    except Policy.DoesNotExist:
+        policy = BasePolicy.objects.get(pk=data['policy'], community=user.community.community)
+    except BasePolicy.DoesNotExist:
         raise Http404("Policy does not exist")
 
     if policy.kind == Policy.CONSTITUTION:
@@ -768,15 +767,15 @@ def policy_action_recover(request):
                                      PolicykitRecoverPlatformPolicy,
                                      PolicykitRecoverTriggerPolicy)
 
-    from policyengine.models import Policy
+    from policyengine.models import BasePolicy, Policy
 
     data = json.loads(request.body)
     user = get_user(request)
 
     action = None
     try:
-        policy = Policy.objects.get(pk=data['policy'], community=user.community.community)
-    except Policy.DoesNotExist:
+        policy = BasePolicy.objects.get(pk=data['policy'], community=user.community.community)
+    except BasePolicy.DoesNotExist:
         raise Http404("Policy does not exist")
 
     if policy.kind == Policy.CONSTITUTION:

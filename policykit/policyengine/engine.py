@@ -225,20 +225,6 @@ def evaluate_action(action):
                 return proposal
 
 
-def get_generated_policy(policy):
-    """
-    Return the GeneratedPolicy child row for `policy` if it is one, else None.
-    (Multi-table inheritance reverse accessor, wrapped since it raises
-    DoesNotExist rather than returning None on a miss.)
-    """
-    from policyengine.models import GeneratedPolicy
-
-    try:
-        return policy.generatedpolicy
-    except GeneratedPolicy.DoesNotExist:
-        return None
-
-
 def create_prefiltered_proposals(action, policies, allow_multiple=False):
     """
     Evaluate action against the Filter step in all provided policies, and return the Proposal
@@ -246,7 +232,7 @@ def create_prefiltered_proposals(action, policies, allow_multiple=False):
 
     If allow_multiple is true, returns a *list* of all Proposals where the action passed the filter (used for Triggers).
     """
-    from policyengine.models import Policy, Proposal
+    from policyengine.models import Proposal
 
     # logger.debug("create_prefiltered_proposals", extra={"create_prefiltered_proposals.action": action, "create_prefiltered_proposals.policies": policies})
     proposals = []
@@ -255,13 +241,7 @@ def create_prefiltered_proposals(action, policies, allow_multiple=False):
         proposal = Proposal(policy=policy, action=action, status=Proposal.PROPOSED)
         context = EvaluationContext(proposal, is_first_evaluation=True)
         try:
-            if get_generated_policy(policy) is not None:
-                # GeneratedPolicy scripts decide relevance inside their own
-                # handlers (via ctx.on(event_type, ...)), not via a filter
-                # code block, so it's always eligible here.
-                passed_filter = True
-            else:
-                passed_filter = exec_code_block(policy.filter, context, Policy.FILTER)
+            passed_filter = policy.passes_filter(context)
         except Exception as e:
             # Log unhandled exception to the db, so policy author can view it in the UI.
             context.logger.error(f"Exception in 'filter': {str(e)}")
@@ -370,20 +350,26 @@ def evaluate_generated_policy(context: EvaluationContext, generated_policy):
 
 
 def evaluate_proposal_inner(context: EvaluationContext, is_first_evaluation: bool):
+    policy = context.proposal.policy
+    return policy.evaluate(context, is_first_evaluation)
+
+
+def evaluate_legacy_policy(policy, context: EvaluationContext, is_first_evaluation: bool):
+    """
+    Evaluate a legacy Policy: run its filter/initialize/check/notify/success/
+    fail code blocks. Called via Policy.evaluate() -- see
+    evaluate_proposal_inner(), which dispatches polymorphically instead of
+    branching on policy type.
+    """
     from policyengine.models import Policy, Proposal
 
     proposal = context.proposal
     action = proposal.action
-    policy = proposal.policy
-
-    generated_policy = get_generated_policy(policy)
-    if generated_policy is not None:
-        return evaluate_generated_policy(context, generated_policy)
 
     #logger.debug('*')
     #logger.debug(action.__dict__)
 
-    if not exec_code_block(policy.filter, context, Policy.FILTER):
+    if not policy.passes_filter(context):
         # logger.debug("does not pass filter")
         raise PolicyDoesNotPassFilter
 

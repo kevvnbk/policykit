@@ -48,25 +48,25 @@ class Community(models.Model):
         return self.communityrole_set.all()
 
     def get_policies(self, is_active=True):
-        return Policy.objects.filter(community=self, is_active=is_active).order_by('-modified_at')
+        return BasePolicy.objects.filter(community=self, is_active=is_active).order_by('-modified_at')
 
     def get_platform_policies(self, is_active=True):
         """
         Returns a QuerySet of all platform policies in the community.
         """
-        return Policy.platform_policies.filter(community=self, is_active=is_active).order_by('-modified_at')
+        return BasePolicy.platform_policies.filter(community=self, is_active=is_active).order_by('-modified_at')
 
     def get_constitution_policies(self, is_active=True):
         """
         Returns a QuerySet of all constitution policies in the community.
         """
-        return Policy.constitution_policies.filter(community=self, is_active=is_active).order_by('-modified_at')
+        return BasePolicy.constitution_policies.filter(community=self, is_active=is_active).order_by('-modified_at')
 
     def get_trigger_policies(self, is_active=True):
         """
         Returns a QuerySet of all trigger policies in the community.
         """
-        return Policy.objects.filter(community=self, kind=Policy.TRIGGER, is_active=is_active).order_by('-modified_at')
+        return BasePolicy.objects.filter(community=self, kind=BasePolicy.TRIGGER, is_active=is_active).order_by('-modified_at')
 
     def get_documents(self, is_active=True):
         """
@@ -510,7 +510,7 @@ class Proposal(models.Model):
     status = models.CharField(choices=STATUS, max_length=10)
     """Status of the proposal. One of PROPOSED, PASSED or FAILED."""
 
-    policy = models.ForeignKey('Policy', on_delete=models.SET_NULL, editable=False, blank=True, null=True)
+    policy = models.ForeignKey('BasePolicy', on_delete=models.SET_NULL, editable=False, blank=True, null=True)
     """The policy that is being evaluated."""
 
     action = models.ForeignKey('BaseAction', on_delete=models.CASCADE, editable=False)
@@ -874,13 +874,13 @@ class WebhookTriggerAction(TriggerAction):
     def __str__(self):
         return f"Trigger: {self.event_type}"
 
-class PlatformPolicyManager(models.Manager):
+class PlatformPolicyManager(PolymorphicManager):
     def get_queryset(self):
-        return super().get_queryset().filter(kind=Policy.PLATFORM)
+        return super().get_queryset().filter(kind=BasePolicy.PLATFORM)
 
-class ConstitutionPolicyManager(models.Manager):
+class ConstitutionPolicyManager(PolymorphicManager):
     def get_queryset(self):
-        return super().get_queryset().filter(kind=Policy.CONSTITUTION)
+        return super().get_queryset().filter(kind=BasePolicy.CONSTITUTION)
 
 class ActionType(models.Model):
     """The action_type of a BaseAction"""
@@ -1017,8 +1017,8 @@ class PolicyVariable(models.Model):
         else:
             return PolicyVariable.convert_variable_types(value, variable_json['type'])
 
-class Policy(models.Model):
-    """Policy"""
+class BasePolicy(PolymorphicModel):
+    """Shared fields and dispatch interface for both kinds of policy"""
 
     PLATFORM = 'platform'
     CONSTITUTION = 'constitution'
@@ -1029,15 +1029,64 @@ class Policy(models.Model):
         (TRIGGER, 'trigger')
     ]
 
+    kind = models.CharField(choices=POLICY_KIND, max_length=30)
+    """Kind of policy (platform, constitution, or trigger)."""
+
+    community = models.ForeignKey(Community, models.CASCADE, null=True)
+    """The community which the policy belongs to."""
+
+    action_types = models.ManyToManyField(ActionType, related_name='policy_set')
+    """The action types that this policy applies to."""
+
+    name = models.CharField(max_length=100)
+    """The name of the policy."""
+
+    description = models.TextField(null=True, blank=True)
+    """The description of the policy. May be empty."""
+
+    is_active = models.BooleanField(default=True)
+    """True if the policy is active. Default is True."""
+
+    modified_at = models.DateTimeField(auto_now=True)
+    """Datetime object representing the last time the policy was modified."""
+
+    # Managers
+    objects = PolymorphicManager()
+    platform_policies = PlatformPolicyManager()
+    constitution_policies = ConstitutionPolicyManager()
+
+    def __str__(self):
+        return f"{self.kind.capitalize()} Policy: {self.name}"
+
+    def passes_filter(self, context) -> bool:
+        """
+        Does this policy apply to the action in `context`? Called once, by
+        create_prefiltered_proposals(), to choose which eligible policy
+        governs an action (and again by Policy.evaluate() on every
+        re-evaluation, to catch a policy that stops applying mid-vote).
+        """
+        raise NotImplementedError
+
+    def evaluate(self, context, is_first_evaluation: bool) -> bool:
+        """
+        Run this policy's evaluation logic for `context`. Called on first
+        evaluation and on every re-evaluation (e.g. after a vote changes).
+        """
+        raise NotImplementedError
+
+
+class Policy(BasePolicy, PolymorphicModel):
+    """
+    Policy defined by the legacy 5-stage filter/initialize/check/notify/
+    success/fail code blocks (the no-code builder).
+    """
+
     FILTER = 'filter'
     INITIALIZE = 'initialize'
     CHECK = 'check'
     NOTIFY = 'notify'
     SUCCESS = 'success'
     FAIL = 'fail'
-
-    kind = models.CharField(choices=POLICY_KIND, max_length=30)
-    """Kind of policy (platform, constitution, or trigger)."""
 
     filter = models.TextField(blank=True, default='')
     """The filter code of the policy."""
@@ -1057,24 +1106,6 @@ class Policy(models.Model):
     fail = models.TextField(blank=True, default='')
     """The fail code of the policy."""
 
-    community = models.ForeignKey(Community, models.CASCADE, null=True)
-    """The community which the policy belongs to."""
-
-    action_types = models.ManyToManyField(ActionType)
-    """The action types that this policy applies to."""
-
-    name = models.CharField(max_length=100)
-    """The name of the policy."""
-
-    description = models.TextField(null=True, blank=True)
-    """The description of the policy. May be empty."""
-
-    is_active = models.BooleanField(default=True)
-    """True if the policy is active. Default is True."""
-
-    modified_at = models.DateTimeField(auto_now=True)
-    """Datetime object representing the last time the policy was modified."""
-
     policy_template = models.OneToOneField(
         'PolicyTemplate',
         on_delete=models.SET_NULL,
@@ -1088,15 +1119,7 @@ class Policy(models.Model):
     """Policies bundled inside this policy."""
 
     # Managers
-    objects = models.Manager()
-    platform_policies = PlatformPolicyManager()
-    constitution_policies = ConstitutionPolicyManager()
-
-    class Meta:
-        abstract = False
-
-    def __str__(self):
-        return f"{self.kind.capitalize()} Policy: {self.name}"
+    objects = PolymorphicManager()
 
     @property
     def is_bundled(self):
@@ -1105,6 +1128,16 @@ class Policy(models.Model):
 
     def save(self, *args, **kwargs):
         super(Policy, self).save(*args, **kwargs)
+
+    def passes_filter(self, context) -> bool:
+        from policyengine.engine import exec_code_block
+
+        return exec_code_block(self.filter, context, Policy.FILTER)
+
+    def evaluate(self, context, is_first_evaluation: bool) -> bool:
+        from policyengine.engine import evaluate_legacy_policy
+
+        return evaluate_legacy_policy(self, context, is_first_evaluation)
 
     def update_variables(self, variable_data = {}):
         """Update related variables based on dict"""
@@ -1143,7 +1176,7 @@ class Policy(models.Model):
         return new_policy
 
 
-class GeneratedPolicy(Policy):
+class GeneratedPolicy(BasePolicy, PolymorphicModel):
     """
     Policy defined by a generated, event-driven script.
 
@@ -1156,6 +1189,9 @@ class GeneratedPolicy(Policy):
     script itself via the ctx object, not by PolicyKit's evaluation engine.
     See policyengine/script_runtime.py and policyengine/engine.py's
     evaluate_generated_policy().
+
+    A direct sibling of Policy under BasePolicy, not a Policy subclass --
+    it has none of the legacy code-block fields.
     """
 
     script_code = models.TextField(blank=True, default='')
@@ -1172,8 +1208,22 @@ class GeneratedPolicy(Policy):
     setup() on each event, so setup()'s own side effects (API calls, store
     writes) happen once at install and not on every incoming action."""
 
+    # Managers
+    objects = PolymorphicManager()
+
     def __str__(self):
         return f"Generated Policy: {self.name}"
+
+    def passes_filter(self, context) -> bool:
+        # GeneratedPolicy scripts decide relevance inside their own handlers
+        # (via ctx.on(event_type, ...)), not via a filter code block, so
+        # it's always eligible here.
+        return True
+
+    def evaluate(self, context, is_first_evaluation: bool) -> bool:
+        from policyengine.engine import evaluate_generated_policy
+
+        return evaluate_generated_policy(context, self)
 
 
 class PolicyStoreEntry(models.Model):
@@ -1188,7 +1238,7 @@ class PolicyStoreEntry(models.Model):
     its own Proposal and therefore its own DataStore).
     """
 
-    policy = models.ForeignKey('Policy', models.CASCADE, related_name='store_entries')
+    policy = models.ForeignKey('GeneratedPolicy', models.CASCADE, related_name='store_entries')
     key = models.CharField(max_length=255)
     value = models.JSONField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1210,7 +1260,7 @@ class ScheduledCallback(models.Model):
     lambdas and bound methods -- none of them can be reconstructed from a name.
     """
 
-    policy = models.ForeignKey('Policy', models.CASCADE, related_name='scheduled_callbacks')
+    policy = models.ForeignKey('GeneratedPolicy', models.CASCADE, related_name='scheduled_callbacks')
     run_at = models.DateTimeField()
     function_name = models.CharField(max_length=255)
     args = models.JSONField(default=list)

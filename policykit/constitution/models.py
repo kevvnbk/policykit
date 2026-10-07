@@ -6,6 +6,7 @@ from django.db import models
 logger = logging.getLogger(__name__)
 
 from policyengine.models import (
+    BasePolicy,
     CommunityDoc,
     CommunityPlatform,
     CommunityRole,
@@ -534,7 +535,7 @@ class PolicykitAddTriggerPolicy(EditorModel):
 
 
 class PolicykitChangePlatformPolicy(EditorModel):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         return "Change Platform Policy: " + self.name
@@ -548,7 +549,7 @@ class PolicykitChangePlatformPolicy(EditorModel):
 
 
 class PolicykitChangeConstitutionPolicy(EditorModel):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         return "Change Constitution Policy: " + self.name
@@ -564,7 +565,7 @@ class PolicykitChangeConstitutionPolicy(EditorModel):
 
 
 class PolicykitChangeTriggerPolicy(EditorModel):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         return "Change Trigger Policy: " + self.name
@@ -578,7 +579,7 @@ class PolicykitChangeTriggerPolicy(EditorModel):
 
 
 class PolicykitRemovePlatformPolicy(ConstitutionAction):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         if self.policy:
@@ -595,7 +596,7 @@ class PolicykitRemovePlatformPolicy(ConstitutionAction):
 
 
 class PolicykitRemoveConstitutionPolicy(ConstitutionAction):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         if self.policy:
@@ -614,7 +615,7 @@ class PolicykitRemoveConstitutionPolicy(ConstitutionAction):
 
 
 class PolicykitRemoveTriggerPolicy(ConstitutionAction):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         if self.policy:
@@ -631,7 +632,7 @@ class PolicykitRemoveTriggerPolicy(ConstitutionAction):
 
 
 class PolicykitRecoverPlatformPolicy(ConstitutionAction):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         if self.policy:
@@ -650,7 +651,7 @@ class PolicykitRecoverPlatformPolicy(ConstitutionAction):
 
 
 class PolicykitRecoverConstitutionPolicy(ConstitutionAction):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         if self.policy:
@@ -669,7 +670,7 @@ class PolicykitRecoverConstitutionPolicy(ConstitutionAction):
 
 
 class PolicykitRecoverTriggerPolicy(ConstitutionAction):
-    policy = models.ForeignKey(Policy, models.SET_NULL, null=True)
+    policy = models.ForeignKey(BasePolicy, models.SET_NULL, null=True)
 
     def __str__(self):
         if self.policy:

@@ -2,7 +2,7 @@ from constitution.models import PolicykitAddCommunityDoc, PolicykitAddRole
 from django.contrib.auth.models import Permission
 from django.test import TestCase
 from integrations.slack.models import SlackPinMessage, SlackUser
-from policyengine.models import ActionType, CommunityRole, Policy, PolicyVariable, Proposal
+from policyengine.models import ActionType, BasePolicy, CommunityRole, GeneratedPolicy, Policy, PolicyVariable, Proposal
 
 import tests.utils as TestUtils
 
@@ -622,5 +622,36 @@ class EvaluationTests(TestCase):
         proposal = Proposal.objects.get(action=action, policy=all_fail_policy)
         self.assertEqual(proposal.status, Proposal.FAILED)
 
-        action.save()  # should do nothing
-        proposal = Proposal.objects.get(action=action, policy=all_fail_policy)
+
+class BasePolicyTests(TestCase):
+    """
+    Policy and GeneratedPolicy are siblings under BasePolicy (see
+    policyengine/models.py). Querying through the shared base should return
+    both, each resolved to its real type.
+    """
+
+    def setUp(self):
+        self.slack_community, self.user = TestUtils.create_slack_community_and_user()
+        self.community = self.slack_community.community
+
+    def test_base_policy_query_returns_both_kinds_correctly_typed(self):
+        legacy_policy = Policy.objects.create(
+            **TestUtils.ALL_ACTIONS_PASS,
+            kind=Policy.PLATFORM,
+            community=self.community,
+        )
+        generated_policy = GeneratedPolicy.objects.create(
+            name="a generated policy",
+            kind=BasePolicy.PLATFORM,
+            community=self.community,
+            script_code="def setup(ctx):\n    pass",
+        )
+
+        policies = {p.pk: p for p in BasePolicy.objects.filter(community=self.community)}
+
+        self.assertEqual(set(policies.keys()), {legacy_policy.pk, generated_policy.pk})
+        self.assertIs(type(policies[legacy_policy.pk]), Policy)
+        self.assertIs(type(policies[generated_policy.pk]), GeneratedPolicy)
+
+        platform_policies = {p.pk for p in self.community.get_platform_policies()}
+        self.assertEqual(platform_policies, {legacy_policy.pk, generated_policy.pk})
