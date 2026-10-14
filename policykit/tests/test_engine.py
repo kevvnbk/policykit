@@ -661,7 +661,7 @@ class GeneratedPolicyDispatchTests(TestCase):
     """
     Every eligible GeneratedPolicy must run on a matching action -- there is
     no trigger/platform "only one policy wins" distinction for generated
-    policies (see engine.run_generated_policies()), and one policy's failure
+    policies (see generated_engine.run_generated_policies()), and one policy's failure
     must not stop the others.
     """
 
@@ -717,3 +717,49 @@ class GeneratedPolicyDispatchTests(TestCase):
         self.assertTrue(self.ran(other_policy))
         self.assertEqual(Proposal.objects.filter(policy=failing_policy, action=action).count(), 0)
         self.assertEqual(Proposal.objects.filter(policy=other_policy, action=action).count(), 1)
+
+    def test_legacy_catchall_does_not_undo_a_generated_policys_revert(self):
+        """
+        Regression test: a legacy "All Platform Actions Pass"-style catch-all
+        policy (no action_types set, so it matches every platform action)
+        must not re-execute an action that a GeneratedPolicy just reverted.
+
+        action._is_executable() treats "already reverted" as license to
+        execute() again, for the case where a LATER approval overturns an
+        EARLIER revert of the SAME proposal. If generated policies ran
+        before the legacy competition, the catch-all's blind pass+execute
+        would trip that same check off the GeneratedPolicy's revert and
+        silently re-post/re-apply the action it just reverted. Generated
+        policies must run after the legacy competition resolves.
+        """
+        reject_script = (
+            "def setup(ctx):\n"
+            "    ctx.on('message_posted', handle)\n"
+            "\n"
+            "def handle(event, ctx):\n"
+            "    ctx.reject()\n"
+        )
+        Policy.objects.create(**TestUtils.ALL_ACTIONS_PASS, kind=Policy.PLATFORM, community=self.community)
+        rejecting_policy = self.make_generated_policy("rejects everything", reject_script)
+
+        action = self.SlackPostMessage(
+            community=self.slack_community, initiator=self.user, text="hello", channel="C1",
+            community_origin=True,
+        )
+        action._test_execute_count = 0
+
+        def mocked_execute():
+            action._test_execute_count += 1
+
+        def mocked_revert():
+            action.community_revert = True
+            action.save()
+
+        action.execute = mocked_execute
+        action._revert = mocked_revert
+        action.save()
+
+        self.assertEqual(action._test_execute_count, 0)
+        self.assertTrue(action.community_revert)
+        proposal = Proposal.objects.get(policy=rejecting_policy, action=action)
+        self.assertEqual(proposal.status, Proposal.FAILED)

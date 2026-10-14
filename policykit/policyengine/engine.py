@@ -32,6 +32,10 @@ class EvaluationContext:
     Class to hold all variables available in a policy evaluation.
     All attributes on this class are in scope and can be used by the policy author.
 
+    Legacy Policy only -- GeneratedPolicy has its own, much smaller runtime
+    context (policyengine.script_runtime.PolicyRuntimeContext) built by
+    policyengine.generated_engine. 
+
     Attributes:
         proposal (Proposal): The proposal representing this evaluation.
         action (BaseAction): The action that triggered this policy evaluation.
@@ -63,7 +67,7 @@ class EvaluationContext:
         self.proposal = proposal
 
         # Can't use logger in filter step because proposal isn't saved yet
-        logger_context = {"community": self.action.community.community} 
+        logger_context = {"community": self.action.community.community}
         if proposal.pk:
             logger_context["proposal"] = proposal
         self.logger = EvaluationLogAdapter(db_logger, logger_context)
@@ -162,52 +166,14 @@ def get_eligible_policies(action):
     return eligible_policies
 
 
-def run_generated_policies(action, generated_policies):
-    """
-    Run every eligible GeneratedPolicy against `action`, independently of
-    each other and of action.kind.
-    """
-    from policyengine.models import Proposal
-
-    proposals = []
-    for policy in generated_policies.order_by('pk'):
-        proposal = Proposal(policy=policy, action=action, status=Proposal.PROPOSED)
-        if not action.pk:
-            action.save()
-        proposal.save()
-        try:
-            evaluate_proposal(proposal, is_first_evaluation=True)
-        except Exception as e:
-            # One policy's failure must not stop the others from running.
-            # Logged with the policy id (not just the proposal) so this is
-            # findable even if the proposal itself gets deleted below.
-            logger.error(
-                f"GeneratedPolicy {policy.pk} ('{policy.name}') raised {type(e).__name__} "
-                f"evaluating {action}: {e}"
-            )
-            proposal.delete()
-        else:
-            proposals.append(proposal)
-    return proposals
-
-
 def evaluate_action(action):
     """
-    Called the FIRST TIME that an action is evaluated.
-
-    GeneratedPolicy is dispatched the same way regardless of action.kind --
-    see run_generated_policies(). Everything below is legacy Policy only:
-
-    For governable actions ("platform" and "constitution"):
-    - Get a list of eligible policies based on action_types. Raise an error if no policies match. There should always be a matching base policy from the starterkit.
-    - Try each policy, executing only the Filter step. The first policy that returns True from the Filter step is the policy that will govern this action.
-    - Evaluate the selected Policy. Create and save the Proposal for the evaluation, which will be re-evaluated from the celery task if it is pending
-
-    For trigger actions:
-    - Evaluate against all eligible policies
-    - Save the Proposal for each evaluation, which will be re-evaluated from the celery task if it is pending
+    Called the FIRST TIME that an action is evaluated. Branch to:
+    - Legacy Policy
+    - Generated Policy
     """
     from policyengine.models import GeneratedPolicy, PolicyActionKind, Proposal
+    from policyengine import generated_engine
 
     # logger.debug("evaluate_action", extra={"evaluate_action.action": action})
 
@@ -219,12 +185,12 @@ def evaluate_action(action):
         else:
             return None
 
-    generated_policies = eligible_policies.instance_of(GeneratedPolicy)
+    # The one and only place a policy's class decides which engine handles
+    # it. Everything below this line, in both engines, is class-agnostic.
     legacy_policies = eligible_policies.not_instance_of(GeneratedPolicy)
+    generated_policies = eligible_policies.instance_of(GeneratedPolicy)
 
-    generated_proposals = run_generated_policies(action, generated_policies)
-
-    # If this is a trigger action, evaluate ALL eligible (legacy) policies
+    # If this is a trigger action, evaluate ALL eligible legacy policies
     if action.kind == PolicyActionKind.TRIGGER:
         proposals = []
         if legacy_policies.exists():
@@ -238,6 +204,7 @@ def evaluate_action(action):
                     proposal.delete()
                 else:
                     proposals.append(proposal)
+        generated_proposals = generated_engine.run_generated_policies(action, generated_policies)
         return proposals + generated_proposals
 
     # If this is a governable action, choose ONE legacy policy to evaluate
@@ -265,6 +232,8 @@ def evaluate_action(action):
                 legacy_winner = proposal
                 break
 
+        generated_proposals = generated_engine.run_generated_policies(action, generated_policies)
+
         if legacy_winner:
             return legacy_winner
 
@@ -272,9 +241,8 @@ def evaluate_action(action):
         # eligible legacy policies at all" -- the common case for a
         # GeneratedPolicy-only community). Multiple generated policies
         # simultaneously deciding the same action is a conflict the engine
-        # doesn't resolve (out of scope, see the task writeup); picking the
-        # first by id keeps today's single-generated-policy behavior (which
-        # this was) unchanged.
+        # doesn't resolve (see generated_engine); picking the first by id
+        # keeps today's single-generated-policy behavior unchanged.
         for proposal in generated_proposals:
             if proposal.status == Proposal.PASSED:
                 return proposal
@@ -283,12 +251,14 @@ def evaluate_action(action):
 
 def create_prefiltered_proposals(action, policies, allow_multiple=False):
     """
-    Evaluate action against the Filter step in all provided policies, and return the Proposal
-    for the first Policy where the aciton passed the Filter.
+    Evaluate action against the Filter step in all provided legacy policies,
+    and return the Proposal for the first Policy where the action passed the
+    Filter. Legacy Policy only -- callers must pre-filter out GeneratedPolicy
+    (see evaluate_action).
 
     If allow_multiple is true, returns a *list* of all Proposals where the action passed the filter (used for Triggers).
     """
-    from policyengine.models import Proposal
+    from policyengine.models import Policy, Proposal
 
     # logger.debug("create_prefiltered_proposals", extra={"create_prefiltered_proposals.action": action, "create_prefiltered_proposals.policies": policies})
     proposals = []
@@ -297,7 +267,7 @@ def create_prefiltered_proposals(action, policies, allow_multiple=False):
         proposal = Proposal(policy=policy, action=action, status=Proposal.PROPOSED)
         context = EvaluationContext(proposal, is_first_evaluation=True)
         try:
-            passed_filter = policy.passes_filter(context)
+            passed_filter = exec_code_block(policy.filter, context, Policy.FILTER)
         except Exception as e:
             # Log unhandled exception to the db, so policy author can view it in the UI.
             context.logger.error(f"Exception in 'filter': {str(e)}")
@@ -336,8 +306,18 @@ def delete_and_rerun(proposal):
 
 def evaluate_proposal(proposal, is_first_evaluation=False):
     """
-    Evaluate policy for given action. This can be run repeatedly to check proposed actions.
+    Evaluate policy for given action. This can be run repeatedly to check
+    proposed actions -- used both by evaluate_action() above (first
+    evaluation) and by the periodic celery task that re-checks PROPOSED
+    proposals (policyengine.tasks.evaluate_pending_proposals).
+
+    This is the second (and only other) top-level branching point: a
+    GeneratedPolicy proposal is handed straight to generated_engine before
+    anything legacy-specific (EvaluationContext, Metagov, policy.variables)
+    gets built for it, since none of that applies to a generated script.
     """
+    from policyengine.models import GeneratedPolicy
+    from policyengine import generated_engine
 
     if not proposal.policy:
         # This could happen if the Policy has been deleted since the first proposal.
@@ -345,6 +325,9 @@ def evaluate_proposal(proposal, is_first_evaluation=False):
 
     if not proposal.policy.is_active:
         raise PolicyIsNotActive
+
+    if isinstance(proposal.policy, GeneratedPolicy):
+        return generated_engine.evaluate_generated_proposal(proposal)
 
     context = EvaluationContext(proposal, is_first_evaluation=is_first_evaluation)
 
@@ -364,68 +347,21 @@ def evaluate_proposal(proposal, is_first_evaluation=False):
         raise
 
 
-def evaluate_generated_policy(context: EvaluationContext, generated_policy):
-    """
-    Evaluate a script policy: convert the triggering action into an event and
-    run whichever handler(s) the script registered for that event type at
-    install time (GeneratedPolicy.handler_registry).
-
-    setup(ctx) is NOT re-run here -- it ran once at install. Re-running it per
-    event would repeat its side effects (API lookups, store writes) on every
-    incoming action.
-
-    This function performs no bookkeeping of its own: a handler decides the
-    triggering action's fate via ctx.approve()/ctx.reject(), unlike
-    evaluate_proposal_inner. A script with no handler for this event type
-    simply leaves the proposal alone. See policyengine/script_runtime.py.
-    """
-    from policyengine import script_runtime
-
-    proposal = context.proposal
-
-    if not generated_policy.initialized:
-        # Dispatch reads the registry that setup() populates at install, so an
-        # uninitialized policy matches nothing. Say so loudly: silently doing
-        # nothing looks exactly like a policy that correctly had no opinion.
-        context.logger.warning(
-            f"Policy '{generated_policy.name}' has never been installed (setup(ctx) has not run), "
-            f"so it has no handlers and will ignore this action. Run "
-            f"`manage.py install_script_policies` to install it."
-        )
-        return True
-
-    event = script_runtime.action_to_event(proposal.action)
-    handlers = script_runtime.dispatch_event(
-        generated_policy, event, proposal=proposal, evaluation_context=context
-    )
-    if not handlers:
-        context.logger.debug(
-            f"Policy '{generated_policy.name}' has no handler for event '{event.type}', ignoring"
-        )
-    return True
-
-
 def evaluate_proposal_inner(context: EvaluationContext, is_first_evaluation: bool):
-    policy = context.proposal.policy
-    return policy.evaluate(context, is_first_evaluation)
-
-
-def evaluate_legacy_policy(policy, context: EvaluationContext, is_first_evaluation: bool):
-    """
-    Evaluate a legacy Policy: run its filter/initialize/check/notify/success/
-    fail code blocks. Called via Policy.evaluate() -- see
-    evaluate_proposal_inner(), which dispatches polymorphically instead of
-    branching on policy type.
-    """
+    """Evaluate a legacy Policy: run its filter/initialize/check/notify/
+    success/fail code blocks. Only ever reached for a legacy Policy -- see
+    evaluate_proposal(), which routes GeneratedPolicy elsewhere before this
+    is called."""
     from policyengine.models import Policy, Proposal
 
     proposal = context.proposal
     action = proposal.action
+    policy = proposal.policy
 
     #logger.debug('*')
     #logger.debug(action.__dict__)
 
-    if not policy.passes_filter(context):
+    if not exec_code_block(policy.filter, context, Policy.FILTER):
         # logger.debug("does not pass filter")
         raise PolicyDoesNotPassFilter
 

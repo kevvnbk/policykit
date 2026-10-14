@@ -1058,22 +1058,6 @@ class BasePolicy(PolymorphicModel):
     def __str__(self):
         return f"{self.kind.capitalize()} Policy: {self.name}"
 
-    def passes_filter(self, context) -> bool:
-        """
-        Does this policy apply to the action in `context`? Called once, by
-        create_prefiltered_proposals(), to choose which eligible policy
-        governs an action (and again by Policy.evaluate() on every
-        re-evaluation, to catch a policy that stops applying mid-vote).
-        """
-        raise NotImplementedError
-
-    def evaluate(self, context, is_first_evaluation: bool) -> bool:
-        """
-        Run this policy's evaluation logic for `context`. Called on first
-        evaluation and on every re-evaluation (e.g. after a vote changes).
-        """
-        raise NotImplementedError
-
 
 class Policy(BasePolicy, PolymorphicModel):
     """
@@ -1129,16 +1113,6 @@ class Policy(BasePolicy, PolymorphicModel):
     def save(self, *args, **kwargs):
         super(Policy, self).save(*args, **kwargs)
 
-    def passes_filter(self, context) -> bool:
-        from policyengine.engine import exec_code_block
-
-        return exec_code_block(self.filter, context, Policy.FILTER)
-
-    def evaluate(self, context, is_first_evaluation: bool) -> bool:
-        from policyengine.engine import evaluate_legacy_policy
-
-        return evaluate_legacy_policy(self, context, is_first_evaluation)
-
     def update_variables(self, variable_data = {}):
         """Update related variables based on dict"""
 
@@ -1180,18 +1154,9 @@ class GeneratedPolicy(BasePolicy, PolymorphicModel):
     """
     Policy defined by a generated, event-driven script.
 
-    Instead of PolicyKit's 5-stage filter/initialize/check/notify/success/fail
-    code blocks, a GeneratedPolicy stores a single script with a setup(ctx)
-    entry point that registers event handlers (ctx.on) and/or scheduled
-    callbacks (ctx.schedule), mirroring the sandbox pipeline's script format
-    (see the pk-sandbox repo). Bookkeeping -- marking the Proposal
-    passed/failed, executing or reverting the action -- is performed by the
-    script itself via the ctx object, not by PolicyKit's evaluation engine.
-    See policyengine/script_runtime.py and policyengine/engine.py's
-    evaluate_generated_policy().
-
-    A direct sibling of Policy under BasePolicy, not a Policy subclass --
-    it has none of the legacy code-block fields.
+    - Stores single script with a setup(ctx) entry point that registers
+    event point that registers event handlers, schedule callbacks
+    - Bookkeeping: marking the Proposal passed/failed, executing/reverting action
     """
 
     script_code = models.TextField(blank=True, default='')
@@ -1213,17 +1178,6 @@ class GeneratedPolicy(BasePolicy, PolymorphicModel):
 
     def __str__(self):
         return f"Generated Policy: {self.name}"
-
-    def passes_filter(self, context) -> bool:
-        # GeneratedPolicy scripts decide relevance inside their own handlers
-        # (via ctx.on(event_type, ...)), not via a filter code block, so
-        # it's always eligible here.
-        return True
-
-    def evaluate(self, context, is_first_evaluation: bool) -> bool:
-        from policyengine.engine import evaluate_generated_policy
-
-        return evaluate_generated_policy(context, self)
 
 
 class PolicyStoreEntry(models.Model):
