@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolicyKit Pipeline API Test</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .section {
+            margin: 20px 0;
+        }
+        label {
+            display: block;
+            margin: 10px 0 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+        textarea {
+            font-family: monospace;
+            resize: vertical;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        .status.running {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+        }
+        .status.completed {
+            background: #d4edda;
+            border: 1px solid #28a745;
+        }
+        .status.failed {
+            background: #f8d7da;
+            border: 1px solid #dc3545;
+        }
+        .stage {
+            margin: 5px 0;
+            padding: 5px;
+        }
+        .stage-pending { color: #999; }
+        .stage-running { color: #007bff; font-weight: bold; }
+        .stage-completed { color: #28a745; }
+        .stage-failed { color: #dc3545; font-weight: bold; }
+        .stage-skipped { color: #6c757d; font-style: italic; }
+        pre {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            border: 1px solid #dee2e6;
+        }
+        .help {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+            border-left: 4px solid #007bff;
+        }
+        .help h3 {
+            margin-top: 0;
+        }
+        .help code {
+            background: #fff;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 PolicyKit Pipeline API Test</h1>
+        <p>Testing deployed pipeline at: <strong>https://agent-api-695390404745.us-central1.run.app</strong></p>
+
+        <div class="help">
+            <h3>📋 You'll Need:</h3>
+            <ul>
+                <li>AWS Access Key ID</li>
+                <li>AWS Secret Access Key</li>
+                <li>AWS Bedrock access enabled (Claude models)</li>
+            </ul>
+            <p><strong>Cost:</strong> ~$0.10-0.20 per test run (billed to your AWS account)</p>
+        </div>
+
+        <div class="section">
+            <label>Policy Text</label>
+            <textarea id="policyText" rows="3" placeholder="e.g., Delete any message that contains the word 'spam'">Delete any message that contains the word "spam"</textarea>
+        </div>
+
+        <div class="section">
+            <label>AWS Access Key ID</label>
+            <input type="text" id="accessKey" placeholder="AKIA...">
+        </div>
+
+        <div class="section">
+            <label>AWS Secret Access Key</label>
+            <input type="password" id="secretKey" placeholder="Your secret key">
+        </div>
+
+        <div class="section">
+            <label>AWS Session Token (optional - required for SSO)</label>
+            <input type="password" id="sessionToken" placeholder="Leave empty if using permanent credentials">
+        </div>
+
+        <div class="section">
+            <label>AWS Region (optional)</label>
+            <input type="text" id="region" placeholder="us-east-1" value="us-east-2">
+        </div>
+
+        <button id="generateBtn" onclick="startPipeline()">Generate Script</button>
+
+        <div id="statusContainer"></div>
+        <div id="resultContainer"></div>
+    </div>
+
+    <script>
+        const API_URL = 'https://agent-api-695390404745.us-central1.run.app';
+        let pollInterval = null;
+
+        async function startPipeline() {
+            const policyText = document.getElementById('policyText').value;
+            const accessKey = document.getElementById('accessKey').value;
+            const secretKey = document.getElementById('secretKey').value;
+            const sessionToken = document.getElementById('sessionToken').value;
+            const region = document.getElementById('region').value || 'us-east-2';
+
+            if (!policyText || !accessKey || !secretKey) {
+                alert('Please fill in all required fields');
+                return;
+            }
+
+            const btn = document.getElementById('generateBtn');
+            btn.disabled = true;
+            btn.textContent = 'Starting...';
+
+            document.getElementById('statusContainer').innerHTML = '';
+            document.getElementById('resultContainer').innerHTML = '';
+
+            try {
+                // Build request body
+                const requestBody = {
+                    policy_text: policyText,
+                    aws_access_key_id: accessKey,
+                    aws_secret_access_key: secretKey,
+                    aws_region: region
+                };
+
+                // Add session token if provided (required for SSO/temporary credentials)
+                if (sessionToken && sessionToken.trim()) {
+                    requestBody.aws_session_token = sessionToken;
+                }
+
+                // Start pipeline
+                const response = await fetch(`${API_URL}/pipeline/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                    try {
+                        const errorData = await response.json();
+                        console.log('Error response:', errorData);
+
+                        // Handle different error formats
+                        if (errorData.detail) {
+                            if (typeof errorData.detail === 'string') {
+                                errorMessage = errorData.detail;
+                            } else if (Array.isArray(errorData.detail)) {
+                                // FastAPI validation errors
+                                errorMessage = errorData.detail.map(e =>
+                                    `${e.loc?.join(' → ') || 'Field'}: ${e.msg}`
+                                ).join(', ');
+                            } else {
+                                errorMessage = JSON.stringify(errorData.detail);
+                            }
+                        } else {
+                            errorMessage = JSON.stringify(errorData);
+                        }
+                    } catch (e) {
+                        // If JSON parsing fails, use text
+                        const text = await response.text();
+                        if (text) errorMessage = text;
+                    }
+                    throw new Error(errorMessage);
+                }
+
+                const { run_id } = await response.json();
+                console.log('Pipeline started:', run_id);
+
+                btn.textContent = 'Running Pipeline...';
+
+                // Start polling
+                pollStatus(run_id);
+
+            } catch (error) {
+                console.error('Full error:', error);
+                const errorMessage = error.message || error.toString() || 'Unknown error occurred';
+                document.getElementById('statusContainer').innerHTML = `
+                    <div class="status failed">
+                        <strong>❌ Error:</strong><br>
+                        ${escapeHtml(errorMessage)}
+                    </div>
+                `;
+                btn.disabled = false;
+                btn.textContent = 'Generate Script';
+            }
+        }
+
+        async function pollStatus(runId) {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+            }
+
+            pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`${API_URL}/pipeline/${runId}/status`);
+                    const status = await response.json();
+
+                    updateStatusDisplay(status);
+
+                    if (status.status === 'completed' || status.status === 'failed') {
+                        clearInterval(pollInterval);
+                        displayResults(status);
+
+                        const btn = document.getElementById('generateBtn');
+                        btn.disabled = false;
+                        btn.textContent = 'Generate Script';
+                    }
+                } catch (error) {
+                    console.error('Poll error:', error);
+                }
+            }, 1000);
+        }
+
+        function updateStatusDisplay(status) {
+            const stages = ['headers', 'script', 'tests', 'execute', 'revise', 'report'];
+            const statusClass = status.status === 'running' ? 'running' :
+                               status.status === 'completed' ? 'completed' : 'failed';
+
+            let html = `
+                <div class="status ${statusClass}">
+                    <strong>Pipeline Status:</strong> ${status.status.toUpperCase()}
+                    ${status.revision_count > 0 ? ` (Revision ${status.revision_count})` : ''}
+                    <br><br>
+            `;
+
+            stages.forEach(stage => {
+                const stageData = status.stages[stage];
+                const stageStatus = stageData.status;
+                const icon = stageStatus === 'completed' ? '✅' :
+                           stageStatus === 'running' ? '⏳' :
+                           stageStatus === 'failed' ? '❌' :
+                           stageStatus === 'skipped' ? '⊘' : '⭕';
+
+                html += `<div class="stage stage-${stageStatus}">`;
+                html += `${icon} <strong>${stage}:</strong> ${stageStatus}`;
+                if (stageData.error) {
+                    html += `<br>&nbsp;&nbsp;&nbsp;&nbsp;Error: ${stageData.error}`;
+                }
+                html += '</div>';
+            });
+
+            html += '</div>';
+            document.getElementById('statusContainer').innerHTML = html;
+        }
+
+        function displayResults(status) {
+            const resultDiv = document.getElementById('resultContainer');
+
+            if (status.status === 'completed') {
+                const script = status.stages.script?.output?.script || 'Script not found';
+                const reportData = status.stages.report?.output;
+
+                resultDiv.innerHTML = `
+                    <h2>✅ Success!</h2>
+                    ${reportData ? `<p><strong>Tests:</strong> ${reportData.passed}/${reportData.total} passed</p>` : ''}
+                    <h3>Generated Script:</h3>
+                    <pre>${escapeHtml(script)}</pre>
+                `;
+            } else {
+                const script = status.stages.script?.output?.script;
+                const error = Object.entries(status.stages)
+                    .find(([_, stage]) => stage.status === 'failed')?.[1]?.error || 'Unknown error';
+
+                resultDiv.innerHTML = `
+                    <h2>❌ Pipeline Failed</h2>
+                    <p><strong>Error:</strong> ${error}</p>
+                    ${script ? `
+                        <h3>Last Attempted Script:</h3>
+                        <pre>${escapeHtml(script)}</pre>
+                    ` : ''}
+                `;
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "nl_policy": "Policy: Channel Lifecycle Management\n\nRule 1: Create New Temporary Channels\n\nWHEN:\nThe daily check at noon of an external Google Sheets request spreadsheet shows new temporary channel request(s).\nIgnore malformed rows, such as those containing missing or corrupted data.\n\nPROCEDURE:\n- Collect relevant fields for each new channel request from spreadsheet: timestamp, email (requester), proposed channel name, purpose of channel, temporary flag, proposed expiry date, additional comments\n- <Optional LLM workflow here to filter out duplicates/inappropriate requests>\n- Directly message 3 randomly selected moderators for approval with request details\n- The time limit for the approval process is set for 24 hours, after which results are tallied\n- A \"YES\" vote is indicated by each moderator through a thumbsup reaction (👍) to the corresponding message. All other reactions or a lack of reaction is a \"NO\" vote\n- If unanimously approved (3/3 YES votes), create the channel with the appropriate settings, including marking it as temporary\n- Send a message in the new channel outlining the channel purpose and, if an end date was configured, when the channel expires\n- Notify the requester of the outcome via direct message\n- If configured, at lifecycle end date, archive the channel and notify affected users of the closure through direct message\n\nRule 2: Remove Inactive Temporary Channels\n\nWHEN:\nWhen checking on the first day of the month, a channel has no message activity in the last 30 days.\nThe channel must be a temporary channel with no configured lifecycle end date.\n\nPROCEDURE:\n- Provide a 24 hour notice of channel removal message in the corresponding channel\n- Notify all moderators via direct message with a list of inactive channels pending removal\n- In the 24 hour period, moderators may overrule the channel removal by replying \"overruled\" to the channel removal message\n- After the 24 hour period, archive all channels marked for removal aside from those overruled by moderators",
+
+  "documents": [
+    {
+      "source_type": "google_sheets",
+      "source_url": "https://docs.google.com/spreadsheets/d/1wrNwj5SVu_Cr7q-6qcTjdIPpyrWDHp1fflBZ3bMOHws/edit#gid=1144320061",
+      "structure": {
+        "spreadsheet_title": "Channel Proposals",
+        "sheet_names": ["Proposals"],
+        "columns": [
+          "Timestamp",
+          "email",
+          "proposed channel name",
+          "purpose of channel",
+          "temporary?",
+          "proposed expiry date",
+          "additional comments"
+        ],
+        "primary_sheet": "Proposals"
+      },
+      "metadata": {
+        "spreadsheet_id": "1wrNwj5SVu_Cr7q-6qcTjdIPpyrWDHp1fflBZ3bMOHws",
+        "gid": "1144320061",
+        "total_sheets": 1,
+        "row_count": 5,
+        "col_count": 7,
+        "writable": false,
+        "fetch_method": "published_csv"
+      }
+    }
+  ],
+
+  "options": {
+    "generate_document_tests": true,
+    "complexity": "high",
+    "description": "Channel lifecycle management with spreadsheet integration, moderator voting, and scheduled archival"
+  }
+}

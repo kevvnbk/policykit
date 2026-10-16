@@ -1,0 +1,44 @@
+# This file specifies files that are *not* uploaded to Google Cloud
+# using gcloud. It follows the same syntax as .gitignore
+
+.gcloudignore
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Tests
+sandboxengine/tests/
+test_*.py
+*_test.py
+
+# Frontend
+frontend/
+node_modules/
+
+# Docs (but keep api_reference.md - needed at runtime)
+docs/*.md
+!docs/api_reference.md
+*.md
+!README.md
+
+# Deployment
+deploy/
+client/
+
+# Local
+.env
+.env.local
+*.log

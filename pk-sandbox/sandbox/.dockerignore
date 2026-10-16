@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Tests
+tests/
+test_*.py
+*_test.py
+
+# Frontend
+frontend/
+node_modules/
+
+# Git
+.git/
+.gitignore
+
+# Docs (but keep api_reference.md - needed at runtime)
+docs/*.md
+!docs/api_reference.md
+*.md
+!README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Local
+.env
+.env.local
+*.log
+
+# Deployment
+deploy/
+client/
+Dockerfile
+.dockerignore

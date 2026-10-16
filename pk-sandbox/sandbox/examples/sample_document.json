@@ -1,0 +1,30 @@
+[
+  {
+    "source_type": "google_sheets",
+    "source_url": "https://docs.google.com/spreadsheets/d/1abc123/edit",
+    "structure": {
+      "spreadsheet_title": "Test Proposals",
+      "columns": ["timestamp", "user", "proposal", "status"],
+      "sheet_names": ["Sheet1"]
+    },
+    "sample_data": [
+      {
+        "timestamp": "2024-01-15 10:00",
+        "user": "alice@example.com",
+        "proposal": "Create #general-discussion channel",
+        "status": "pending"
+      },
+      {
+        "timestamp": "2024-01-15 11:30",
+        "user": "bob@example.com",
+        "proposal": "Create #random channel",
+        "status": "approved"
+      }
+    ],
+    "metadata": {
+      "spreadsheet_id": "1abc123",
+      "row_count": 2,
+      "last_updated": "2024-01-15T12:00:00Z"
+    }
+  }
+]
