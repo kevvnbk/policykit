@@ -1,0 +1,151 @@
+# Full docker-compose with PolicyKit + Sandbox + Agent
+# Use this for local development with all services
+
+services:
+  # ============================================================================
+  # PolicyKit Services (Django)
+  # ============================================================================
+
+  web:
+    build: ./policykit/
+    command: python3 manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file: ".env"
+    environment:
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbit:5672/
+      - DATABASE_URL=postgres://user:password@postgres:5432/policykit
+      - DJANGO_SECRET_KEY=supersecretkey
+      - SERVER_URL=https://${DOMAIN}
+      - ALLOWED_HOSTS=*
+      - DJANGO_DEBUG_TOOLBAR=True
+      - DJANGO_VITE_DEV_MODE=${DJANGO_VITE_DEV_MODE:-True}
+      - DJANGO_SILK=True
+      - LOG_FILE=/app/log
+    depends_on:
+      - rabbit
+      - postgres
+      - frontend
+
+  # Django frontend (Vite dev server)
+  frontend:
+    build: ./frontend/
+    volumes:
+      - .:/app
+    ports:
+      - "5173:5173"
+
+  celery:
+    build: ./policykit/
+    user: django-user
+    command: "celery -A policykit worker --loglevel=info"
+    volumes:
+      - .:/app
+    env_file: ".env"
+    environment:
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbit:5672/
+      - DATABASE_URL=postgres://user:password@postgres:5432/policykit
+    depends_on:
+      - rabbit
+      - postgres
+
+  celerybeat:
+    build: ./policykit/
+    user: django-user
+    command: "celery -A policykit beat --loglevel=info"
+    env_file: ".env"
+    volumes:
+      - .:/app
+    environment:
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbit:5672/
+      - DATABASE_URL=postgres://user:password@postgres:5432/policykit
+    depends_on:
+      - rabbit
+      - postgres
+
+  # ============================================================================
+  # Sandbox Service (FastAPI)
+  # ============================================================================
+
+  sandbox:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+    command: uvicorn sandboxengine.urls:app --host 0.0.0.0 --port 8001 --reload
+    volumes:
+      - ./sandbox:/app
+    ports:
+      - "8001:8001"
+    environment:
+      - ENVIRONMENT=development
+      - ALLOWED_ORIGINS=http://localhost:8000,http://localhost:5173,http://localhost:3000
+      - RATE_LIMIT=100/minute
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/sandbox/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Agent Service (FastAPI)
+  # ============================================================================
+
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    command: uvicorn main:app --host 0.0.0.0 --port 8002 --reload
+    volumes:
+      - ./agent:/app
+    ports:
+      - "8002:8002"
+    environment:
+      - ENVIRONMENT=development
+      - SANDBOX_URL=http://sandbox:8001
+    depends_on:
+      - sandbox
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Infrastructure Services
+  # ============================================================================
+
+  rabbit:
+    image: rabbitmq:3-management
+    ports:
+      - 5672:5672
+      - 15672:15672
+
+  postgres:
+    image: postgres:alpine
+    environment:
+      - POSTGRES_DB=policykit
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # Optional: ngrok for external access
+  ngrok:
+    image: ngrok/ngrok:latest
+    depends_on:
+      - web
+    command:
+      - "http"
+      - "http://host.docker.internal:8000"
+      - "--domain=${DOMAIN}"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    profiles:
+      - ngrok  # Only start with: docker-compose --profile ngrok up
+
+volumes:
+  postgres-data:
