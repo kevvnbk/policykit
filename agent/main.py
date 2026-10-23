@@ -86,6 +86,32 @@ class StartPipelineResponse(BaseModel):
     status: str
 
 
+class AwsCredentialsRequest(BaseModel):
+    """AWS credentials for LLM calls."""
+    aws_access_key_id: str = Field(..., description="AWS Access Key ID")
+    aws_secret_access_key: str = Field(..., description="AWS Secret Access Key")
+    aws_session_token: str | None = Field(None, description="AWS Session Token (optional)")
+    aws_region: str = Field(default="us-east-1")
+
+    def to_credentials(self) -> dict:
+        credentials = {
+            "access_key_id": self.aws_access_key_id,
+            "secret_access_key": self.aws_secret_access_key,
+            "region": self.aws_region,
+        }
+        if self.aws_session_token:
+            credentials["session_token"] = self.aws_session_token
+        return credentials
+
+
+class SuggestScenariosRequest(AwsCredentialsRequest):
+    """Request to suggest real-community scenarios without running the pipeline."""
+    policy_text: str = Field(..., min_length=10, max_length=10000)
+    script: str | None = Field(
+        None, description="Implemented governance script (optional; policy-only if omitted)"
+    )
+
+
 class PipelineStatusResponse(BaseModel):
     """Response for pipeline status."""
     run_id: str
@@ -251,6 +277,43 @@ def get_stage_output(run_id: str, stage_name: str) -> Dict[str, Any]:
         "started_at": stage.started_at,
         "completed_at": stage.completed_at,
     }
+
+
+@app.post("/scenarios/suggest")
+def suggest_scenarios(request: SuggestScenariosRequest) -> Dict[str, Any]:
+    """
+    Suggest scenarios users can try in their real community to see a policy work.
+
+    Standalone: needs only the policy text, no pipeline run. A script can
+    optionally be supplied to make the scenarios specific to its behaviour.
+    """
+    try:
+        return orchestrator.suggest_scenarios(
+            request.policy_text, request.to_credentials(), request.script or None
+        )
+    except Exception as e:
+        logger.exception("Scenario suggestion failed")
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
+
+
+@app.post("/pipeline/{run_id}/suggestions")
+def regenerate_suggestions(run_id: str, request: AwsCredentialsRequest) -> Dict[str, Any]:
+    """
+    (Re)generate scenario suggestions for an existing run using its final script.
+
+    Credentials are required because runs do not store them.
+    """
+    run = orchestrator.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if not run.final_script:
+        raise HTTPException(status_code=409, detail=f"Run {run_id} has no generated script yet")
+
+    orchestrator._suggestions_stage(run, run.final_script, request.to_credentials())
+    stage = run.stages["suggestions"]
+    if stage.error:
+        raise HTTPException(status_code=502, detail=stage.error)
+    return stage.output
 
 
 @app.get("/pipeline/history")

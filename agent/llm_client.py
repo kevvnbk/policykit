@@ -17,7 +17,7 @@ from typing import Any
 import boto3
 from botocore.config import Config
 
-from prompts import headers, script, tests, revise
+from prompts import headers, script, tests, revise, suggestions
 
 logger = logging.getLogger(__name__)
 
@@ -408,6 +408,60 @@ def generate_tests(
 
     return {
         "scenarios": scenarios_json,
+        "parse_error": parse_error,
+        "raw_output": result["text"],
+        "tokens_used": result["tokens_used"],
+        "latency_ms": result["latency_ms"],
+    }
+
+
+def generate_scenario_suggestions(
+    policy_text: str,
+    script_code: str | None = None,
+    credentials: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """
+    Stage 7: Suggest natural-language scenarios users can try in their real community.
+
+    Independent of the sandbox test scenarios; the output is for humans only.
+
+    Args:
+        policy_text: Natural language governance policy
+        script_code: Optional final implemented script (policy-only if omitted)
+        credentials: AWS credentials dict (access_key_id, secret_access_key, region) or (bearer_token, region)
+
+    Returns: {"focus_areas": list[dict], "scenarios": list[dict], "parse_error": str | None,
+              "raw_output": str, "tokens_used": int, "latency_ms": float}
+    """
+    system_prompt, user_prompt = suggestions.format_prompt(policy_text, script_code)
+
+    result = _call_bedrock(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        credentials=credentials,
+        temperature=0.5,
+        max_tokens=8000,
+    )
+
+    parse_error = None
+    focus_areas: list[dict] = []
+    scenarios: list[dict] = []
+    try:
+        parsed = _extract_json(result["text"])
+        if not isinstance(parsed, dict):
+            raise ValueError("expected a JSON object with focus_areas and scenarios")
+        focus_areas = parsed.get("focus_areas", [])
+        scenarios = parsed.get("scenarios", [])
+        if not isinstance(focus_areas, list) or not isinstance(scenarios, list):
+            raise ValueError("focus_areas and scenarios must be lists")
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Failed to parse scenario suggestions JSON: {e}")
+        parse_error = str(e)
+        focus_areas, scenarios = [], []
+
+    return {
+        "focus_areas": focus_areas,
+        "scenarios": scenarios,
         "parse_error": parse_error,
         "raw_output": result["text"],
         "tokens_used": result["tokens_used"],

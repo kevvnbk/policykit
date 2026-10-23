@@ -59,11 +59,13 @@ class PipelineRun:
         "tests": StageResult(),
         "execute": StageResult(),
         "revise": StageResult(),
+        "suggestions": StageResult(),
         "report": StageResult(),
     })
     status: str = "pending"
     created_at: float = field(default_factory=time.time)
     revision_count: int = 0
+    final_script: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +171,7 @@ class PipelineOrchestrator:
                 document_schemas
             )
             script = script_result["script"]
+            run.final_script = script
             self._complete_stage(run, "script", {
                 "script": script,
                 "tokens_used": script_result["tokens_used"],
@@ -218,6 +221,7 @@ class PipelineOrchestrator:
             if all_passed:
                 self._complete_stage(run, "execute", execute_output)
                 run.stages["revise"].status = StageStatus.SKIPPED
+                self._suggestions_stage(run, script, credentials)
                 self._report_stage(run, results)
                 return run
 
@@ -243,6 +247,7 @@ class PipelineOrchestrator:
                     credentials
                 )
                 script = revision_result["script"]
+                run.final_script = script
 
                 # Test revised script
                 results = self.sandbox.execute(script, scenarios)
@@ -277,6 +282,8 @@ class PipelineOrchestrator:
                 self._fail_stage(run, "revise", f"Failed after {self._max_revisions} revision attempts")
                 run.stages["revise"].output = revise_output
 
+            # Suggestions are independent of sandbox results: treat the script as correct
+            self._suggestions_stage(run, script, credentials)
             self._report_stage(run, results)
 
         except Exception as e:
@@ -289,9 +296,46 @@ class PipelineOrchestrator:
 
         return run
 
+    def suggest_scenarios(
+        self,
+        policy_text: str,
+        credentials: dict[str, str],
+        script: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Generate natural-language scenarios for users to try in their real community.
+
+        Independent of the sandbox test scenarios, so it can be called on its own
+        or as the final pipeline stage. The script is optional; without it the
+        scenarios come from the policy text alone. Raises if the LLM output can't
+        be parsed.
+        """
+        result = self.llm.generate_scenario_suggestions(policy_text, script, credentials)
+        if result["parse_error"] or not result["scenarios"]:
+            raise RuntimeError(
+                f"LLM returned no valid scenario suggestions: {result['parse_error'] or 'empty list'}"
+            )
+        return {
+            "focus_areas": result["focus_areas"],
+            "scenarios": result["scenarios"],
+            "tokens_used": result["tokens_used"],
+            "latency_ms": result["latency_ms"],
+        }
+
+    def _suggestions_stage(self, run: PipelineRun, script: str, credentials: dict[str, str]) -> None:
+        """Run the suggestions stage. Non-blocking: a failure does not fail the run."""
+        self._start_stage(run, "suggestions")
+        try:
+            output = self.suggest_scenarios(run.policy_text, credentials, script)
+            self._complete_stage(run, "suggestions", output)
+        except Exception as e:
+            logger.exception(f"Scenario suggestions failed for run {run.id}")
+            self._fail_stage(run, "suggestions", f"{type(e).__name__}: {e}")
+
     def _start_stage(self, run: PipelineRun, stage_name: str) -> None:
         stage = run.stages[stage_name]
         stage.status = StageStatus.RUNNING
+        stage.error = None
         stage.started_at = time.time()
 
     def _complete_stage(self, run: PipelineRun, stage_name: str, output: Any) -> None:

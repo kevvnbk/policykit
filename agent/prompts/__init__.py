@@ -9,6 +9,7 @@ from . import headers
 from . import script
 from . import tests
 from . import revise
+from . import suggestions
 
-__all__ = ["headers", "script", "tests", "revise"]
+__all__ = ["headers", "script", "tests", "revise", "suggestions"]
 

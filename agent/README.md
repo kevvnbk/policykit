@@ -110,7 +110,22 @@ GET /health
 3. **Tests** - Generate test scenarios (never sees script)
 4. **Execute** - Run script against tests in sandbox
 5. **Revise** - Fix failing scripts (up to 3 attempts)
-6. **Report** - Final pass/fail summary
+6. **Suggestions** - Natural-language scenarios users can try in their real community to see the policy work (independent of the sandbox results: runs on the final script even if sandbox tests still failed after revisions; a failure here does not fail the run)
+7. **Report** - Final pass/fail summary
+
+### Scenario Suggestions
+
+Generated automatically as the `suggestions` stage (`GET /pipeline/{run_id}/stages/suggestions`). The LLM first lists the parts of the policy worth seeing in practice (`focus_areas`), then designs as many scenarios as needed to cover them (`scenarios`, each with `covers`, `steps`, `expected_outcome`, etc.).
+
+Can also be called without a pipeline run:
+
+```bash
+POST /scenarios/suggest
+{"policy_text": "...", "aws_access_key_id": "...", "aws_secret_access_key": "..."}
+# "script" is optional; include it to make scenarios specific to the implemented behaviour
+
+POST /pipeline/{run_id}/suggestions     # regenerate for an existing run (credentials in body)
+```
 
 ## Frontend Integration
 
