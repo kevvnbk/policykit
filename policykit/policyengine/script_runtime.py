@@ -229,8 +229,24 @@ class PlatformAdapter:
         raise NotImplementedError
 
 
+def _namespace(raw, **fields):
+    """Shared shape for adapter results scripts access as objects (channel.id,
+    user.roles, ...) while keeping the original platform object reachable via
+    .raw, in case a handler needs something this namespace doesn't expose."""
+    return types.SimpleNamespace(raw=raw, **fields)
+
+
 class SlackPlatformAdapter(PlatformAdapter):
-    """Real adapter, backed by this community's SlackCommunity."""
+    """
+    Real adapter, backed by this community's SlackCommunity. Translates
+    between ctx methods and SlackCommunity's own methods -- it does not
+    reimplement Slack API calls itself. Where SlackCommunity doesn't already
+    expose what a ctx method needs (reactions.get has no wrapper of its own,
+    and post_message's signature is proposal-shaped, not a bare target+text),
+    this goes through SlackCommunity._make_generic_api_call() -- the same
+    LogAPICall-wrapped call SlackCommunity's own methods use internally -- so
+    there's exactly one place that makes a raw Slack call, not two.
+    """
 
     def __init__(self, community):
         self.community = community
@@ -246,7 +262,7 @@ class SlackPlatformAdapter(PlatformAdapter):
 
     def get_channels(self):
         return [
-            types.SimpleNamespace(id=c.get("id"), name=c.get("name"), raw=c)
+            _namespace(c, id=c.get("id"), name=c.get("name"))
             for c in self.slack.get_conversations()
         ]
 
@@ -258,38 +274,28 @@ class SlackPlatformAdapter(PlatformAdapter):
             return None
         # Scripts check `r.lower() in {...}` against .roles, so hand back role
         # NAMES, not the CommunityRole objects get_roles() returns.
-        return types.SimpleNamespace(
-            id=user.username,
-            roles=[r.role_name for r in user.get_roles()],
-            raw=user,
-        )
+        return _namespace(user, id=user.username, roles=[r.role_name for r in user.get_roles()])
 
     def get_message_reactions(self, channel_id, timestamp):
-        from policyengine.models import LogAPICall
-
-        response = LogAPICall.make_api_call(
-            self.slack,
-            values={"method_name": "reactions.get", "channel": channel_id, "timestamp": str(timestamp)},
-            call="reactions.get",
+        response = self.slack._make_generic_api_call(
+            "reactions.get", {"channel": channel_id, "timestamp": str(timestamp)}
         ) or {}
         message = response.get("message") or {}
         return [{"name": r.get("name"), "count": r.get("count", 0)} for r in message.get("reactions", [])]
 
     def post_message(self, target_id, text):
-        from policyengine.models import LogAPICall
-
         # chat.postMessage takes a user id in `channel` and delivers a DM, so one
-        # call covers both "post to a channel" and "DM a user".
+        # call covers both "post to a channel" and "DM a user" -- which is why
+        # this goes through _make_generic_api_call() rather than
+        # SlackCommunity.post_message(), whose post_type/users signature is
+        # built around a Proposal a script doesn't have.
         #
-        # Routed through LogAPICall (not metagov_plugin directly) so the call is
-        # recorded: is_policykit_action() matches incoming Slack events against
-        # recent LogAPICalls by text, which is what stops a message this policy
-        # just posted from coming back as an event and re-triggering it.
-        response = LogAPICall.make_api_call(
-            self.slack,
-            values={"method_name": "chat.postMessage", "channel": target_id, "text": text},
-            call="chat.postMessage",
-        ) or {}
+        # _make_generic_api_call() itself is what records the call via
+        # LogAPICall: is_policykit_action() matches incoming Slack events
+        # against recent LogAPICalls by text, which is what stops a message
+        # this policy just posted from coming back as an event and
+        # re-triggering it.
+        response = self.slack._make_generic_api_call("chat.postMessage", {"channel": target_id, "text": text}) or {}
         return response.get("ts")
 
 

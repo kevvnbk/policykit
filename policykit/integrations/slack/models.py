@@ -81,7 +81,7 @@ class SlackCommunity(CommunityPlatform):
             logger.debug(f"Overriding token? {True if data.get('token') else False}")
 
             try:
-                self.__make_generic_api_call(call, data)
+                self._make_generic_api_call(call, data)
             except Exception as e:
                 logger.error(f"Error making API call in _execute_platform_action: {e}")
                 raise
@@ -95,7 +95,7 @@ class SlackCommunity(CommunityPlatform):
                             "ts": e.vote_post_id,
                             "channel": obj.channel,
                         }
-                        self.__make_generic_api_call("chat.delete", values)
+                        self._make_generic_api_call("chat.delete", values)
 
     def post_message(
         self, proposal, text, users=None, post_type="channel", channel=None, thread_ts=None, reply_broadcast=False
@@ -140,7 +140,7 @@ class SlackCommunity(CommunityPlatform):
             for username in usernames:
                 values["user"] = username
                 values["channel"] = channel
-                response = self.__make_generic_api_call("chat.postEphemeral", values)
+                response = self._make_generic_api_call("chat.postEphemeral", values)
                 posts.append(response["message_ts"])
             return posts
 
@@ -156,8 +156,14 @@ class SlackCommunity(CommunityPlatform):
 
         return []
 
-    def __make_generic_api_call(self, method: str, values):
-        """Make any Slack method request using Metagov action 'slack.method' """
+    def _make_generic_api_call(self, method: str, values):
+        """
+        Make any Slack method request using Metagov action 'slack.method'.
+
+        Single-underscore (not double) so this is reachable from outside the
+        class without name-mangling -- script_runtime.SlackPlatformAdapter
+        calls this directly rather than re-wrapping LogAPICall itself.
+        """
         cleaned = {k: v for k, v in values.items() if v is not None} if values else {}
 
         # Use LogAPICall so the API call is recorded in the database. This gets used by the `is_policykit_action` helper to determine,
@@ -187,14 +193,14 @@ class SlackCommunity(CommunityPlatform):
             else:
                 return None
 
-        response = self.__make_generic_api_call("conversations.list", {"types": types_arg})
+        response = self._make_generic_api_call("conversations.list", {"types": types_arg})
         return [channel for channel in response["channels"] if get_channel_type(channel) in types]
 
     def get_real_users(self):
         """
         Get realname and id of all slack workspace members that are not bot and not slackbot
         """
-        response = self.__make_generic_api_call("users.list", {})
+        response = self._make_generic_api_call("users.list", {})
         members = response['members']
         ret = [{'value': x['id'], 'name': x.get('real_name', '')} for x in members if x['is_bot'] is False and x['name'] != 'slackbot']
         return ret
@@ -202,7 +208,7 @@ class SlackCommunity(CommunityPlatform):
     def get_users_in_channel(self, channel=None):
         from policyengine.models import CommunityUser
         if channel:
-            response = self.__make_generic_api_call("conversations.members", {"channel": channel})
+            response = self._make_generic_api_call("conversations.members", {"channel": channel})
             users = []
             for member in response["members"]:
                 user = CommunityUser.objects.filter(community=self, username=member).first()
