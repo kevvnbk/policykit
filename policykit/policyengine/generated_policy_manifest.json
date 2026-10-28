@@ -9,7 +9,7 @@
     {
       "name": "ctx.execute_action",
       "signature": "ctx.execute_action(action_type, **params)",
-      "description": "Run one of this platform's PolicyKit actions immediately, e.g. ctx.execute_action(\"slackpinmessage\", channel=..., timestamp=...). See the manifest's \"actions\" for types and params. There is no vote. For the action that triggered this handler, use approve()/reject() instead, which also record the decision."
+      "description": "Run a platform action now, e.g. ctx.execute_action(\"slackpinmessage\", channel=..., timestamp=...). Types and params are under \"actions\". No vote; for the triggering action use approve()/reject()."
     },
     {
       "name": "ctx.get_channel",

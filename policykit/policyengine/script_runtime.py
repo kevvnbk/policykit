@@ -231,6 +231,9 @@ class PlatformAdapter:
     def post_message(self, target_id, text):
         raise NotImplementedError
 
+    def count_members(self):
+        raise NotImplementedError
+
     @classmethod
     def action_classes(cls):
         """{codename: GovernableAction subclass} that ctx.execute_action() can
@@ -352,6 +355,10 @@ class SlackPlatformAdapter(PlatformAdapter):
         # re-triggering it.
         response = self.slack._make_generic_api_call("chat.postMessage", {"channel": target_id, "text": text}) or {}
         return response.get("ts")
+
+    def count_members(self):
+        # Every non-bot member of the workspace, from Slack itself
+        return len(self.slack.get_real_users())
 
     @classmethod
     def action_classes(cls):
@@ -581,7 +588,10 @@ class PolicyRuntimeContext:
     # -- actions beyond the triggering one ----------------------------------
 
     def execute_action(self, action_type, **params):
-        """Run a GovernableAction on the platform. The action type is a string."""
+        """Run a platform action now, e.g.
+        ctx.execute_action("slackpinmessage", channel=..., timestamp=...).
+        Types and params are under "actions". No vote; for the triggering
+        action use approve()/reject()."""
         action = _build_action(self.platform, action_type, params)
         self.platform.execute_action(action)
         self.log(f"Policy '{self.policy.name}' executed {action_type} {params}")
@@ -724,15 +734,13 @@ def build_deployment_context(community, platform=None):
     """
     The live facts about one community that a script generator needs.
     """
-    from policyengine.models import CommunityUser
-
     platform = platform or SlackPlatformAdapter(community)
     return {
         "platform": platform.platform,
         "community_name": community.community_name,
         "channels": [{"id": c.id, "name": c.name} for c in platform.get_channels()],
         "roles": [role.role_name for role in community.get_roles()],
-        "member_count": CommunityUser.objects.filter(community__community=community).count(),
+        "member_count": platform.count_members(),
     }
 
 

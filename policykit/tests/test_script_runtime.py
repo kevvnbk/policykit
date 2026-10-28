@@ -439,8 +439,12 @@ class DeploymentContextTests(ScriptRuntimeTestCase):
     URL = "/api/generated_policies/context"
 
     def get(self, **headers):
+        from integrations.slack.models import SlackCommunity
+
+        real_users = [{"value": f"U{i}", "name": f"member {i}"} for i in range(30)]
         with override_settings(POLICYKIT_DEPLOY_COMMUNITY_ID=str(self.community.pk)), \
-                mock.patch.object(script_runtime.SlackPlatformAdapter, "get_channels", self.platform.get_channels):
+                mock.patch.object(script_runtime.SlackPlatformAdapter, "get_channels", self.platform.get_channels), \
+                mock.patch.object(SlackCommunity, "get_real_users", return_value=real_users):
             return self.client.get(self.URL, **headers)
 
     def test_requires_the_deploy_secret(self):
@@ -459,7 +463,8 @@ class DeploymentContextTests(ScriptRuntimeTestCase):
             body["channels"], [{"id": "C_SOCIAL", "name": "social"}, {"id": "C_ANN", "name": "announcements"}]
         )
         self.assertIn("moderator", body["roles"])
-        self.assertEqual(body["member_count"], 1)
+        # Slack's member list, not the 1 member PolicyKit happens to have a record for.
+        self.assertEqual(body["member_count"], 30)
 
 
 class PolicyStoreConcurrencyTests(TransactionTestCase):
