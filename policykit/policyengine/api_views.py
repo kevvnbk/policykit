@@ -142,44 +142,69 @@ def put_members(user, action, role, members):
     action_model.save(evaluate_action=True)
 
 
+def _deploy_target(request):
+    """
+    Auth and target community shared by the generated-policy endpoints.
+    Returns (community, None), or (None, an error Response to return).
+    Stand-in for more general auth in the future."
+    """
+    from django.conf import settings
+    from policyengine.models import Community
+
+    if not settings.POLICYKIT_DEPLOY_SECRET:
+        return None, Response({"error": "POLICYKIT_DEPLOY_SECRET is not configured on this server"}, status=500)
+    if request.headers.get("X-Deploy-Secret") != settings.POLICYKIT_DEPLOY_SECRET:
+        return None, Response({"error": "invalid or missing X-Deploy-Secret header"}, status=403)
+
+    if not settings.POLICYKIT_DEPLOY_COMMUNITY_ID:
+        return None, Response({"error": "POLICYKIT_DEPLOY_COMMUNITY_ID is not configured on this server"}, status=500)
+    try:
+        return Community.objects.get(pk=settings.POLICYKIT_DEPLOY_COMMUNITY_ID), None
+    except Community.DoesNotExist:
+        return None, Response(
+            {"error": f"configured POLICYKIT_DEPLOY_COMMUNITY_ID={settings.POLICYKIT_DEPLOY_COMMUNITY_ID} does not exist"},
+            status=500,
+        )
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def generated_policy_context(request):
+    """
+    Live context about the deploy target community for a script generator:
+    the platform, channels (with the IDs scripts must use), role names, size.
+    """
+    from policyengine import script_runtime
+
+    community, error = _deploy_target(request)
+    if error:
+        return error
+    try:
+        return Response(script_runtime.build_deployment_context(community))
+    except Exception as e:
+        return Response({"error": f"could not read community from platform: {type(e).__name__}: {e}"}, status=502)
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def deploy_generated_policy(request):
     """
     Create a GeneratedPolicy from a script produced by an external policy
-    generation pipeline (see policy-llm's /deploy_to_policykit).
-
-    Prototype-grade auth: a single shared secret (X-Deploy-Secret header,
-    checked against POLICYKIT_DEPLOY_SECRET) and a single hardcoded target
-    community (POLICYKIT_DEPLOY_COMMUNITY_ID) -- not how this would work for
-    real multi-tenant use. See NOTES.md.
+    generation pipeline (see policy-llm's /deploy_to_policykit). Auth and
+    target community: see _deploy_target().
     """
-    from django.conf import settings
     from django.db import transaction
-    from policyengine.models import Community, GeneratedPolicy, ActionType
+    from policyengine.models import GeneratedPolicy, ActionType
     from policyengine import script_runtime
 
-    if not settings.POLICYKIT_DEPLOY_SECRET:
-        return Response({"error": "POLICYKIT_DEPLOY_SECRET is not configured on this server"}, status=500)
-
-    provided_secret = request.headers.get("X-Deploy-Secret")
-    if provided_secret != settings.POLICYKIT_DEPLOY_SECRET:
-        return Response({"error": "invalid or missing X-Deploy-Secret header"}, status=403)
+    community, error = _deploy_target(request)
+    if error:
+        return error
 
     name = request.data.get("name")
     script_code = request.data.get("script_code")
     if not name or not script_code:
         return Response({"error": "both 'name' and 'script_code' are required"}, status=400)
-
-    if not settings.POLICYKIT_DEPLOY_COMMUNITY_ID:
-        return Response({"error": "POLICYKIT_DEPLOY_COMMUNITY_ID is not configured on this server"}, status=500)
-    try:
-        community = Community.objects.get(pk=settings.POLICYKIT_DEPLOY_COMMUNITY_ID)
-    except Community.DoesNotExist:
-        return Response(
-            {"error": f"configured POLICYKIT_DEPLOY_COMMUNITY_ID={settings.POLICYKIT_DEPLOY_COMMUNITY_ID} does not exist"},
-            status=500,
-        )
 
     # Install the policy: create it, then run its setup(ctx) exactly once.
     # setup() is the real thing, not a dry run -- real scripts do real work in

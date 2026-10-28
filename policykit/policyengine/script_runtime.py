@@ -31,6 +31,7 @@ import inspect
 import json
 import logging
 import types
+from pathlib import Path
 
 from django.utils import timezone
 
@@ -216,6 +217,8 @@ class PlatformAdapter:
     reuse PolicyRuntimeContext as-is, with no duplicated persistence logic.
     """
 
+    platform = None
+
     def get_channels(self):
         raise NotImplementedError
 
@@ -227,6 +230,56 @@ class PlatformAdapter:
 
     def post_message(self, target_id, text):
         raise NotImplementedError
+
+    @classmethod
+    def action_classes(cls):
+        """{codename: GovernableAction subclass} that ctx.execute_action() can
+        run on this platform. None by default."""
+        return {}
+
+    def execute_action(self, action):
+        """Run an unsaved, already-validated GovernableAction on the platform."""
+        raise NotImplementedError
+
+
+def _build_action(adapter, action_type, params):
+    """
+    Turn a ctx.execute_action() call into an unsaved instance of the
+    platform's own GovernableAction model. 
+    """
+    from django.core.exceptions import ValidationError
+
+    if not isinstance(action_type, str):
+        raise PolicyScriptError(
+            "ctx.execute_action() takes an action type name first, e.g. "
+            "ctx.execute_action('slackpinmessage', channel=..., timestamp=...)."
+        )
+    available = adapter.action_classes()
+    action_cls = available.get(action_type)
+    if action_cls is None:
+        raise PolicyScriptError(
+            f"Unknown action type '{action_type}'. This deployment supports: "
+            f"{', '.join(sorted(available)) or 'none'}."
+        )
+
+    allowed = list(action_cls.EXECUTE_PARAMETERS)
+    unexpected = sorted(set(params) - set(allowed))
+    if unexpected:
+        raise PolicyScriptError(
+            f"ctx.execute_action('{action_type}') got unexpected parameter(s): {', '.join(unexpected)}. "
+            f"It takes: {', '.join(allowed)}."
+        )
+
+    action = action_cls(**params)
+    try:
+        action.full_clean(
+            exclude=[f.name for f in action_cls._meta.fields if f.name not in allowed],
+            validate_unique=False,
+        )
+    except ValidationError as e:
+        problems = "; ".join(f"{name}: {' '.join(msgs)}" for name, msgs in e.message_dict.items())
+        raise PolicyScriptError(f"ctx.execute_action('{action_type}') got invalid parameters -- {problems}")
+    return action
 
 
 def _namespace(raw, **fields):
@@ -247,6 +300,8 @@ class SlackPlatformAdapter(PlatformAdapter):
     LogAPICall-wrapped call SlackCommunity's own methods use internally -- so
     there's exactly one place that makes a raw Slack call, not two.
     """
+
+    platform = "slack"
 
     def __init__(self, community):
         self.community = community
@@ -298,6 +353,19 @@ class SlackPlatformAdapter(PlatformAdapter):
         response = self.slack._make_generic_api_call("chat.postMessage", {"channel": target_id, "text": text}) or {}
         return response.get("ts")
 
+    @classmethod
+    def action_classes(cls):
+
+        from policyengine.utils import get_action_classes
+
+        return {c._meta.model_name: c for c in get_action_classes("slack") if c.ACTION}
+
+    def execute_action(self, action):
+        # Attaches slack community and runs legacy actions
+        slack = self.slack
+        action.community = slack
+        slack._execute_platform_action(action)
+
 
 # --------------------------------------------------------------------------
 # Durable per-policy key/value store
@@ -324,6 +392,7 @@ class PolicyStore:
         return row.value
 
     def set(self, key, value):
+        """Store a JSON-serialisable value under key."""
         from django.db import IntegrityError
         from policyengine.models import PolicyStoreEntry
 
@@ -401,29 +470,36 @@ class PolicyRuntimeContext:
         self._decided = False
 
     def now(self):
+        """Current time as a timezone-aware datetime."""
         return self._now() if callable(self._now) else (self._now or timezone.now())
 
     # -- world (delegated) --------------------------------------------------
 
     def get_channels(self):
+        """All channels, each with .id and .name."""
         return self.platform.get_channels()
 
     def get_channel(self, channel_id):
+        """The channel with this ID (not name), or None."""
         for channel in self.get_channels():
             if channel.id == channel_id:
                 return channel
         return None
 
     def get_user(self, user_id):
+        """A member by ID, with .id and .roles (role names), or None."""
         return self.platform.get_user(user_id)
 
     def get_message_reactions(self, channel_id, timestamp):
+        """Reactions on a message, as a list of {"name": emoji, "count": n}."""
         return self.platform.get_message_reactions(channel_id, timestamp)
 
     def post_message(self, target_id, text):
+        """Post text to a channel ID, or DM a user by passing their user ID."""
         return self.platform.post_message(target_id, text)
 
     def get_members(self):
+        """All members of this community."""
         from policyengine.models import CommunityUser
 
         return CommunityUser.objects.filter(community__community=self.policy.community)
@@ -431,9 +507,9 @@ class PolicyRuntimeContext:
     # -- registration -------------------------------------------------------
 
     def on(self, event_type, handler):
-        """Register a handler for an event type. Only the NAME is kept -- see
-        module docstring -- so the same top-level-function rule as schedule()
-        applies."""
+        """Register a top-level function as the handler for an event type.
+        Call from setup(): only the function's NAME is kept, so closures and
+        lambdas are rejected, as in schedule()."""
         name = _require_top_level_function(handler, "ctx.on")
         handlers = self.registered_handlers.setdefault(event_type, [])
         if name not in handlers:
@@ -502,6 +578,14 @@ class PolicyRuntimeContext:
         if self.action._is_reversible:
             self.action._revert()
 
+    # -- actions beyond the triggering one ----------------------------------
+
+    def execute_action(self, action_type, **params):
+        """Run a GovernableAction on the platform. The action type is a string."""
+        action = _build_action(self.platform, action_type, params)
+        self.platform.execute_action(action)
+        self.log(f"Policy '{self.policy.name}' executed {action_type} {params}")
+
 
 # --------------------------------------------------------------------------
 # Events
@@ -517,6 +601,13 @@ ACTION_TYPE_TO_EVENT_TYPE = {
 }
 EVENT_TYPE_TO_ACTION_TYPE = {v: k for k, v in ACTION_TYPE_TO_EVENT_TYPE.items()}
 
+# action attribute -> event.data key, for whichever of these an action has.
+_EVENT_DATA_ATTRS = (("text", "text"), ("channel", "channel_id"))
+
+# Top-level attributes of the event object a handler receives. Channel, text,
+# etc. are NOT here -- they live in event.data.
+EVENT_ATTRIBUTES = ("type", "data", "actor_id", "timestamp")
+
 
 def action_to_event(action):
     """
@@ -527,7 +618,7 @@ def action_to_event(action):
     action_type = getattr(action, "action_type", type(action).__name__.lower())
     timestamp = getattr(action, "timestamp", None)
     data = {"action_type": action_type}
-    for attr, key in (("text", "text"), ("channel", "channel_id")):
+    for attr, key in _EVENT_DATA_ATTRS:
         if hasattr(action, attr):
             data[key] = getattr(action, attr)
     if timestamp:
@@ -551,6 +642,98 @@ def event_type_to_action_type_codename(event_type):
     script's registered events correspond to. None for an unknown event type --
     the caller reports it rather than this guessing."""
     return EVENT_TYPE_TO_ACTION_TYPE.get(event_type)
+
+
+# --------------------------------------------------------------------------
+# Manifest: what a script can use on this deployment
+# --------------------------------------------------------------------------
+
+def _describe_methods(cls, prefix):
+    methods = []
+    for name, fn in inspect.getmembers(cls, inspect.isfunction):
+        if name.startswith("_"):
+            continue
+        params = list(inspect.signature(fn).parameters.values())[1:]
+        doc = inspect.getdoc(fn) or ""
+        methods.append({
+            "name": f"{prefix}{name}",
+            "signature": f"{prefix}{name}({', '.join(str(p) for p in params)})",
+            "description": " ".join(doc.split()),
+        })
+    return methods
+
+
+def _describe_actions(adapter_cls):
+    actions = []
+    for codename, cls in sorted(adapter_cls.action_classes().items()):
+        variables = {v["name"]: v for v in getattr(cls, "EXECUTE_VARIABLES", None) or []}
+        params = []
+        for name in cls.EXECUTE_PARAMETERS:
+            field = cls._meta.get_field(name)
+            variable = variables.get(name, {})
+            params.append({
+                "name": name,
+                "label": variable.get("label") or str(field.verbose_name),
+                "required": not field.blank,
+                "type": variable.get("type") or field.get_internal_type(),
+                "entity": variable.get("entity"),
+            })
+        actions.append({
+            "type": codename,
+            "description": (getattr(cls, "ACTION_NAME", None) or str(cls._meta.verbose_name)).strip(),
+            "params": params,
+        })
+    return actions
+
+
+MANIFEST_PATH = Path(__file__).with_name("generated_policy_manifest.json")
+
+
+def build_manifest(adapter_cls=None):
+    """
+    Everything a generated script can rely on, derived from this runtime's own
+    code rather than written by hand.
+    """
+    from django.apps import apps
+
+    adapter_cls = adapter_cls or SlackPlatformAdapter
+    models_by_codename = {model._meta.model_name: model for model in apps.get_models()}
+
+    events = []
+    for codename, event_type in ACTION_TYPE_TO_EVENT_TYPE.items():
+        model = models_by_codename.get(codename)
+        fields = ["action_type"] + [key for attr, key in _EVENT_DATA_ATTRS if hasattr(model, attr)]
+        if hasattr(model, "timestamp"):
+            fields += ["timestamp", "message_id"]
+        events.append({"type": event_type, "data_fields": fields})
+
+    return {
+        "platform": adapter_cls.platform,
+        "ctx_methods": _describe_methods(PolicyRuntimeContext, "ctx.") + _describe_methods(PolicyStore, "ctx.store."),
+        "event_attributes": list(EVENT_ATTRIBUTES),
+        "events": events,
+        "actions": _describe_actions(adapter_cls),
+    }
+
+
+def manifest_json():
+    return json.dumps(build_manifest(), indent=2) + "\n"
+
+
+def build_deployment_context(community, platform=None):
+    """
+    The live facts about one community that a script generator needs.
+    """
+    from policyengine.models import CommunityUser
+
+    platform = platform or SlackPlatformAdapter(community)
+    return {
+        "platform": platform.platform,
+        "community_name": community.community_name,
+        "channels": [{"id": c.id, "name": c.name} for c in platform.get_channels()],
+        "roles": [role.role_name for role in community.get_roles()],
+        "member_count": CommunityUser.objects.filter(community__community=community).count(),
+    }
 
 
 # --------------------------------------------------------------------------

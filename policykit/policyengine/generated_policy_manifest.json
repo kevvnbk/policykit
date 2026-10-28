@@ -1,0 +1,249 @@
+{
+  "platform": "slack",
+  "ctx_methods": [
+    {
+      "name": "ctx.approve",
+      "signature": "ctx.approve()",
+      "description": "Approve the action that triggered this evaluation. No-op when there is no triggering action (install / scheduled callback)."
+    },
+    {
+      "name": "ctx.execute_action",
+      "signature": "ctx.execute_action(action_type, **params)",
+      "description": "Run one of this platform's PolicyKit actions immediately, e.g. ctx.execute_action(\"slackpinmessage\", channel=..., timestamp=...). See the manifest's \"actions\" for types and params. There is no vote. For the action that triggered this handler, use approve()/reject() instead, which also record the decision."
+    },
+    {
+      "name": "ctx.get_channel",
+      "signature": "ctx.get_channel(channel_id)",
+      "description": "The channel with this ID (not name), or None."
+    },
+    {
+      "name": "ctx.get_channels",
+      "signature": "ctx.get_channels()",
+      "description": "All channels, each with .id and .name."
+    },
+    {
+      "name": "ctx.get_members",
+      "signature": "ctx.get_members()",
+      "description": "All members of this community."
+    },
+    {
+      "name": "ctx.get_message_reactions",
+      "signature": "ctx.get_message_reactions(channel_id, timestamp)",
+      "description": "Reactions on a message, as a list of {\"name\": emoji, \"count\": n}."
+    },
+    {
+      "name": "ctx.get_user",
+      "signature": "ctx.get_user(user_id)",
+      "description": "A member by ID, with .id and .roles (role names), or None."
+    },
+    {
+      "name": "ctx.log",
+      "signature": "ctx.log(message, level='info')",
+      "description": "Write to this evaluation's EvaluationLog, so it shows on the dashboard's Logs page. Falls back to the module logger when there is no evaluation in progress (install, or a scheduled callback)."
+    },
+    {
+      "name": "ctx.now",
+      "signature": "ctx.now()",
+      "description": "Current time as a timezone-aware datetime."
+    },
+    {
+      "name": "ctx.on",
+      "signature": "ctx.on(event_type, handler)",
+      "description": "Register a top-level function as the handler for an event type. Call from setup(): only the function's NAME is kept, so closures and lambdas are rejected, as in schedule()."
+    },
+    {
+      "name": "ctx.post_message",
+      "signature": "ctx.post_message(target_id, text)",
+      "description": "Post text to a channel ID, or DM a user by passing their user ID."
+    },
+    {
+      "name": "ctx.reject",
+      "signature": "ctx.reject()",
+      "description": "Reject the triggering action: mark the proposal failed and revert it if it is reversible (for a Slack message, that deletes it)."
+    },
+    {
+      "name": "ctx.schedule",
+      "signature": "ctx.schedule(delay_seconds, func, *args)",
+      "description": "Call func(*args, ctx) after delay_seconds, durably. Writes a row; holds nothing in memory."
+    },
+    {
+      "name": "ctx.store.get",
+      "signature": "ctx.store.get(key, default=None)",
+      "description": ""
+    },
+    {
+      "name": "ctx.store.keys",
+      "signature": "ctx.store.keys()",
+      "description": ""
+    },
+    {
+      "name": "ctx.store.remove",
+      "signature": "ctx.store.remove(key)",
+      "description": ""
+    },
+    {
+      "name": "ctx.store.set",
+      "signature": "ctx.store.set(key, value)",
+      "description": "Store a JSON-serialisable value under key."
+    },
+    {
+      "name": "ctx.store.setdefault",
+      "signature": "ctx.store.setdefault(key, default)",
+      "description": ""
+    }
+  ],
+  "event_attributes": [
+    "type",
+    "data",
+    "actor_id",
+    "timestamp"
+  ],
+  "events": [
+    {
+      "type": "message_posted",
+      "data_fields": [
+        "action_type",
+        "text",
+        "channel_id",
+        "timestamp",
+        "message_id"
+      ]
+    },
+    {
+      "type": "member_joined_channel",
+      "data_fields": [
+        "action_type",
+        "channel_id"
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "type": "slackjoinconversation",
+      "description": "Invite User to Channel",
+      "params": [
+        {
+          "name": "channel",
+          "label": "Channel",
+          "required": true,
+          "type": "string",
+          "entity": "SlackChannel"
+        },
+        {
+          "name": "users",
+          "label": "Invited user",
+          "required": true,
+          "type": "string",
+          "entity": "CommunityUser"
+        }
+      ]
+    },
+    {
+      "type": "slackkickconversation",
+      "description": "Kick User from Channel",
+      "params": [
+        {
+          "name": "user",
+          "label": "Kicked users",
+          "required": true,
+          "type": "string",
+          "entity": "CommunityUser"
+        },
+        {
+          "name": "channel",
+          "label": "Channel",
+          "required": true,
+          "type": "string",
+          "entity": "SlackChannel"
+        }
+      ]
+    },
+    {
+      "type": "slackpinmessage",
+      "description": "Pin Message",
+      "params": [
+        {
+          "name": "channel",
+          "label": "Channel",
+          "required": true,
+          "type": "string",
+          "entity": "SlackChannel"
+        },
+        {
+          "name": "timestamp",
+          "label": "Timestamp of the pinned message",
+          "required": true,
+          "type": "timestamp",
+          "entity": "Timestamp"
+        }
+      ]
+    },
+    {
+      "type": "slackpostmessage",
+      "description": "Post Message",
+      "params": [
+        {
+          "name": "text",
+          "label": "Message",
+          "required": true,
+          "type": "string",
+          "entity": "Text"
+        },
+        {
+          "name": "channel",
+          "label": "Channel",
+          "required": true,
+          "type": "string",
+          "entity": "SlackChannel"
+        }
+      ]
+    },
+    {
+      "type": "slackrenameconversation",
+      "description": "Rename Channel",
+      "params": [
+        {
+          "name": "channel",
+          "label": "Renaming channel",
+          "required": true,
+          "type": "string",
+          "entity": "SlackChannel"
+        },
+        {
+          "name": "name",
+          "label": "New channel name",
+          "required": true,
+          "type": "string",
+          "entity": "Text"
+        }
+      ]
+    },
+    {
+      "type": "slackschedulemessage",
+      "description": "Schedule Message",
+      "params": [
+        {
+          "name": "text",
+          "label": "Message",
+          "required": true,
+          "type": "string",
+          "entity": null
+        },
+        {
+          "name": "channel",
+          "label": "Channel",
+          "required": true,
+          "type": "string",
+          "entity": "SlackChannel"
+        },
+        {
+          "name": "post_at",
+          "label": "Scheduled time",
+          "required": true,
+          "type": "timestamp",
+          "entity": "Timestamp"
+        }
+      ]
+    }
+  ]
+}

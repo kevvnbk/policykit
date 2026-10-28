@@ -96,6 +96,7 @@ urlpatterns = [
     path('api/logs', policyapiviews.logs),
     path('api/settings', policyapiviews.settings),
     path('api/generated_policies/deploy', policyapiviews.deploy_generated_policy),
+    path('api/generated_policies/context', policyapiviews.generated_policy_context),
 ]
 
 if apps.is_installed("pattern_library"):

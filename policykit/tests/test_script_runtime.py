@@ -1,10 +1,12 @@
 import datetime
+import json
 import os
 import threading
 import types
+from unittest import mock
 
 from django.db import connection
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 import tests.utils as TestUtils
@@ -33,6 +35,16 @@ class FakePlatformAdapter(PlatformAdapter):
         self.users = users or {}
         self.reactions = reactions if reactions is not None else []
         self.posted = []
+        self.executed = []
+
+    @classmethod
+    def action_classes(cls):
+        # The real Slack action models, so scripts are validated against the
+        # actual legacy definitions -- only the final Slack call is faked.
+        return script_runtime.SlackPlatformAdapter.action_classes()
+
+    def execute_action(self, action):
+        self.executed.append(action)
 
     def get_channels(self):
         return [types.SimpleNamespace(id=cid, name=name) for cid, name in self.channels]
@@ -327,6 +339,127 @@ class EventShapeTests(ScriptRuntimeTestCase):
         self.assertEqual(event.data.get("channel_id"), "C_SOCIAL")
         self.assertEqual(event.data.get("text"), "channel name: x")
         self.assertEqual(event.data.get("message_id"), "1700000000.0001")
+
+
+class ActionBridgeTests(ScriptRuntimeTestCase):
+    """ctx.execute_action(): run any of the platform's own PolicyKit action
+    models (the legacy integration), not a separate list of script actions."""
+
+    SLACK_ACTIONS = {
+        "slackpostmessage", "slackrenameconversation", "slackjoinconversation",
+        "slackpinmessage", "slackschedulemessage", "slackkickconversation",
+    }
+
+    PIN_SCRIPT = (
+        "def setup(ctx):\n"
+        "    ctx.on('message_posted', handle)\n"
+        "\n"
+        "def handle(event, ctx):\n"
+        "    ctx.execute_action('slackpinmessage', channel=event.data.get('channel_id'),\n"
+        "                       timestamp=event.data.get('timestamp'))\n"
+    )
+
+    def ctx(self):
+        return script_runtime.PolicyRuntimeContext(self.policy, platform=self.platform)
+
+    def test_script_runs_a_legacy_action(self):
+        from integrations.slack.models import SlackPinMessage
+
+        policy = GeneratedPolicy.objects.create(
+            kind="platform", name="pin it", community=self.community, script_code=self.PIN_SCRIPT
+        )
+        script_runtime.install_script_policy(policy, platform=self.platform)
+        script_runtime.dispatch_event(policy, self.proposal_event(), platform=self.platform)
+
+        [action] = self.platform.executed
+        self.assertIsInstance(action, SlackPinMessage)
+        self.assertEqual((action.channel, action.timestamp), ("C_SOCIAL", "1700000000.0001"))
+        self.assertIsNone(action.pk)  # never saved, so never re-evaluated by policies
+
+    def test_invalid_actions_are_rejected(self):
+        ctx = self.ctx()
+        cases = [
+            ("slackbanuser", {"user": "U1"}, "Unknown action type 'slackbanuser'"),
+            ("slackkickconversation", {"user": "U1", "channel": "C1", "community_origin": True},
+             "unexpected parameter(s): community_origin"),
+            ("slackpinmessage", {"channel": "C1"}, "timestamp:"),
+            ("slackschedulemessage", {"text": "hi", "channel": "C1", "post_at": "soon"}, "post_at:"),
+        ]
+        for action_type, params, message in cases:
+            with self.subTest(message):
+                with self.assertRaises(PolicyScriptError) as cm:
+                    ctx.execute_action(action_type, **params)
+                self.assertIn(message, str(cm.exception))
+        self.assertEqual(self.platform.executed, [])
+
+    def test_slack_adapter_runs_every_legacy_slack_action_through_slack_community(self):
+        from integrations.slack.models import SlackCommunity, SlackKickConversation
+
+        self.assertEqual(set(script_runtime.SlackPlatformAdapter.action_classes()), self.SLACK_ACTIONS)
+
+        adapter = script_runtime.SlackPlatformAdapter(self.community)
+        action = SlackKickConversation(user="U1", channel="C1")
+        with mock.patch.object(SlackCommunity, "_execute_platform_action") as execute:
+            adapter.execute_action(action)
+        execute.assert_called_once_with(action)
+        self.assertEqual(action.community, self.slack_community)
+
+    def test_manifest_is_derived_from_the_runtime(self):
+        manifest = script_runtime.build_manifest()
+
+        actions = {a["type"]: a for a in manifest["actions"]}
+        self.assertEqual(set(actions), self.SLACK_ACTIONS)
+        post = {p["name"]: p for p in actions["slackpostmessage"]["params"]}
+        self.assertEqual(list(post), ["text", "channel"])  # EXECUTE_PARAMETERS, in order
+        self.assertEqual((post["channel"]["entity"], post["channel"]["required"]), ("SlackChannel", True))
+
+        events = {e["type"]: e["data_fields"] for e in manifest["events"]}
+        self.assertIn("channel_id", events["message_posted"])
+        self.assertIn("message_id", events["message_posted"])
+        self.assertIn("ctx.execute_action", {m["name"] for m in manifest["ctx_methods"]})
+        self.assertNotIn("channel_id", manifest["event_attributes"])
+
+        class ReadOnlyAdapter(PlatformAdapter):
+            pass
+
+        self.assertEqual(script_runtime.build_manifest(ReadOnlyAdapter)["actions"], [])
+
+    def test_committed_manifest_file_is_up_to_date(self):
+        with open(script_runtime.MANIFEST_PATH, encoding="utf-8") as f:
+            committed = json.load(f)
+        self.assertEqual(
+            committed,
+            json.loads(script_runtime.manifest_json()),
+            "generated_policy_manifest.json is stale -- run `manage.py export_script_manifest` and commit it",
+        )
+
+
+@override_settings(POLICYKIT_DEPLOY_SECRET="s3cret")
+class DeploymentContextTests(ScriptRuntimeTestCase):
+    URL = "/api/generated_policies/context"
+
+    def get(self, **headers):
+        with override_settings(POLICYKIT_DEPLOY_COMMUNITY_ID=str(self.community.pk)), \
+                mock.patch.object(script_runtime.SlackPlatformAdapter, "get_channels", self.platform.get_channels):
+            return self.client.get(self.URL, **headers)
+
+    def test_requires_the_deploy_secret(self):
+        self.assertEqual(self.get().status_code, 403)
+        self.assertEqual(self.get(HTTP_X_DEPLOY_SECRET="wrong").status_code, 403)
+
+    def test_returns_real_channel_ids_and_role_names(self):
+        CommunityRole.objects.create(role_name="moderator", community=self.community)
+
+        response = self.get(HTTP_X_DEPLOY_SECRET="s3cret")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["platform"], "slack")
+        self.assertEqual(
+            body["channels"], [{"id": "C_SOCIAL", "name": "social"}, {"id": "C_ANN", "name": "announcements"}]
+        )
+        self.assertIn("moderator", body["roles"])
+        self.assertEqual(body["member_count"], 1)
 
 
 class PolicyStoreConcurrencyTests(TransactionTestCase):
